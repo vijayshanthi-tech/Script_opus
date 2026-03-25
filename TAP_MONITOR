@@ -1,0 +1,661 @@
+[R63_TAPLIVE@dmmlw-esxvm-1048 source_code]$ cat TAP_MONITOR.COM
+$!*****************************************************************************
+$!
+$       phase   =       "STARTING"
+$!
+$       set     noon
+$!
+$!*****************************************************************************
+$!
+$!
+$! Procedure Name       :       TAP$MONITOR.COM
+$! Case ID              :       TAPOP0280
+$! Spec ID              :       TAPSO280.DOC
+$!
+$! Description          :       Monitor TAP files and processes.
+$!
+$! Modified by          :       S.R.Campbell.   28-4-98.        1st draft.
+$!                              S.R.Campbell.   9-6-98.         Set procname.
+$!                              S.R.Campbell.   25-6-98.        Shutdown logicals.
+$!                              S.R.Campbell.   15-6-98.        Check for GSDM jobs.
+$!                              P.Murphy        02-08-2001      Sahara - remove inbound
+$!                                                              validation, pricing & splitting.
+$!                              Goutam B        19-12-2008      Code changes for Oracle 10g issue.
+$!                              Rajesh K     v1.0   17-4-2008   Code changes for observations from PRT.
+$!******************************************************************************************************
+$!
+$!              This defines my global symbols.
+$!
+$       verify          =       f$verify(0)
+$       bell[0,32]      ==      %D7
+$       crlf[0,8]       ==      %D13
+$       crlf[8,8]       ==      %D10
+$       csi[0,8]        ==      %D155
+$       esc[0,8]        ==      %D27
+$       tab[0,8]        ==      %D9
+$!
+$       big1    ==      "''esc'#3"
+$       big2    ==      "''esc'#4"
+$       blink   ==      "''csi'5m"
+$       bold    ==      "''csi'1m"
+$       cll     ==      "''csi'2K"
+$       cls     ==      "''csi'2J"
+$       grof    ==      "''esc'(B"
+$       gron    ==      "''esc'(0"
+$       l23     ==      "''csi'23;1H''cll'"
+$       norm    ==      "''csi'?5l"
+$       off     ==      "''csi'0m"
+$       operator==      "oper8"
+$       rev     ==      "''csi'7m"
+$       rev_scr ==      "''csi'?5h"
+$       status  ==      1
+$       top     ==      "''csi'1;1H"
+$       under   ==      "''csi'4m"
+$       wide    ==      "''esc'#6"
+$       wo      ==      "write sys$output"
+$       wof     ==      "write outfile"
+$       verify  =       f$verify('verify')
+$       input   ==      "$cel$system:cel$input"
+$!
+$       default_tap_file_check_period   ==      "00:15:00"
+$!
+$!******************************************************************************
+$!
+$!
+$!              SAVE CURRENT ENVIRONMENT
+$!
+$!
+$ save_environment:
+$!
+$       phase           =       "SAVE_ENVIRONMENT"
+$!
+$       proc            =       f$environment("PROCEDURE")
+$       procname        =       f$parse(proc,,,"NAME")
+$       pid             =       f$getjpi("","pid")
+$!
+$!-------------------------------------
+$!
+$       ctx     =       ""
+$       temp    =       f$context("process",ctx,"nodename","*","eql")
+$       temp    =       f$context("process",ctx,"prcnam","tap$monitor","eql")
+$!
+$       pid     =       f$pid(ctx)
+$!
+$       if      pid .nes. ""
+$       then
+$               node    =       f$getjpi(pid,"nodename")
+$               status  ==      "TAP$MONITOR is already running on node ''node' : pid=''pid'"
+$               temp    =       f$context ("process", ctx, "cancel")
+$               goto    error
+$       endif
+$!
+$       set     process/name="TAP$MONITOR"
+$!
+$!---------------------------------------
+$!
+$!
+$       if      f$mode() .eqs. "INTERACTIVE"
+$       then
+$               set     term/nobroad
+$               contcodes       =       f$environment("control")
+$               messcodes       =       f$environment("message")
+$               defdir          =       f$environment("default")
+$               set     message/notext/noseverity/nofacility/noid
+$               verify          =       f$verify(0)
+$               set     control =       (t,y)
+$       else
+$               set     message/text/severity/facility/id
+$               verify          =       f$verify(1)
+$       endif
+$!
+$!
+$!
+$!******************************************************************************
+$!******************************************************************************
+$!
+$!              Main command procedure
+$!
+$ loop:
+$!
+$       phase   =       "LOOP"
+$!
+$!
+$!
+$       if      f$trnlnm("tap_closedown_monitor") then goto exit
+$       if      f$cvtime() .gts. f$trnlnm("tap_closedown_all") then goto exit
+$!
+$!              ------------------
+$!
+$       call    file_check_logical
+$       if      status .eq. 3 then call send_request "TAP_FILE_CHECK_PERIOD not defined"
+$       if      status .eq. 5 then call send_request "TAP_FILE_CHECK_PERIOD not defined correctly"
+$!
+$!              ------------------
+$!
+$       call    oracle
+$       if      status .eq. 3 then call send_request "ORACLE is not running"
+$!
+$!              ------------------
+$!
+$       call    ibcc
+$       if      status .eq. 3 then call send_request "TAP_IBCC_FILE_WARNING_LIMIT not defined"
+$       if      status .eq. 5 then call send_request "TAP_IBCC_FILE_WARNING_LIMIT not defined correctly"
+$       if      status .eq. 7 then call send_request "TAP_IBCC_FILE_WARNING_LIMIT has been exceeded"
+$!
+$!              ------------------
+$!
+$       call    obcc
+$       if      status .eq. 3 then call send_request "TAP_OBCC_FILE_WARNING_LIMIT not defined"
+$       if      status .eq. 5 then call send_request "TAP_OBCC_FILE_WARNING_LIMIT not defined correctly"
+$       if      status .eq. 7 then call send_request "TAP_OBCC_FILE_WARNING_LIMIT has been exceeded"
+$!
+$!              ------------------
+$!
+$       call    rowcounts
+$       if      status .eq. 3 then call send_request "Cannot extract rowcounts from ORACLE"
+$       if      status .eq. 5 then call send_request "Error reading spoolfile"
+$!
+$!              ------------------
+$!
+$! Sahara - remove logical
+$!      call    ibvp
+$!      if      status .eq. 3 then call send_request "TAP_IBVP_FILE_WARNING_LIMIT not defined"
+$!      if      status .eq. 5 then call send_request "TAP_IBVP_FILE_WARNING_LIMIT not defined correctly"
+$!      if      status .eq. 7 then call send_request "TAP_IBVP_FILE_WARNING_LIMIT has been exceeded"
+$!
+$!              ------------------
+$!
+$       call    obvp
+$       if      status .eq. 3 then call send_request "TAP_OBVP_FILE_WARNING_LIMIT not defined"
+$       if      status .eq. 5 then call send_request "TAP_OBVP_FILE_WARNING_LIMIT not defined correctly"
+$       if      status .eq. 7 then call send_request "TAP_OBVP_FILE_WARNING_LIMIT has been exceeded"
+$!
+$!              ------------------
+$!
+$! Sahara - remove logical
+$!      call    ibsp
+$!      if      status .eq. 3 then call send_request "TAP_IBSP_FILE_WARNING_LIMIT not defined"
+$!      if      status .eq. 5 then call send_request "TAP_IBSP_FILE_WARNING_LIMIT not defined correctly"
+$!      if      status .eq. 7 then call send_request "TAP_IBSP_FILE_WARNING_LIMIT has been exceeded"
+$!
+$!              ------------------
+$!
+$       call    obsp
+$       if      status .eq. 3 then call send_request "TAP_OBSP_FILE_WARNING_LIMIT not defined"
+$       if      status .eq. 5 then call send_request "TAP_OBSP_FILE_WARNING_LIMIT not defined correctly"
+$       if      status .eq. 7 then call send_request "TAP_OBSP_FILE_WARNING_LIMIT has been exceeded"
+$!
+$!              ------------------
+$!
+$       call    gaps
+$       if      status .eq. 3 then call send_request "Queue name not found for Gap Check"
+$       if      status .eq. 5 then call send_request "Process name not found for Gap Check"
+$       if      status .eq. 7 then call send_request "Error submitting TAP_GAPS_01 to queue ''gapq'"
+$!
+$!              ------------------
+$!
+$       call    gsdm
+$       if      status .eq. 3 then call send_request "Queue name not found for GSDM Check"
+$       if      status .eq. 5 then call send_request "Process name not found for GSDM Check"
+$       if      status .eq. 7 then call send_request "Error submitting TAP_GSDM_01 to queue ''gsdq'"
+$!
+$!              ------------------
+$!
+$       wait    'tap_file_check_period'
+$!
+$       goto    loop
+$!
+$!
+$!
+$!******************************************************************************
+$!******************************************************************************
+$!
+$       SEND_REQUEST:           SUBROUTINE
+$!
+$ start_send_request:
+$!
+$       if      f$getjpi("","prccnt") .lt. f$getjpi("","prclm")
+$       then
+$               pipe/trust      request/reply/to='operator'     "''p1'" &
+$               exit
+$       endif
+$!
+$       request/to='operator'  "Subprocess limit reached - please reply to requests"
+$!
+$       wait    00:00:30
+$!
+$       goto    start_send_request
+$!
+$       ENDSUBROUTINE
+$!
+$!******************************************************************************
+$!******************************************************************************
+$!
+$       FILE_CHECK_LOGICAL:     SUBROUTINE
+$!
+$       status  ==      1
+$!
+$       tap_file_check_period   ==      f$trnlnm("tap_file_check_period")
+$!
+$       if      tap_file_check_period .eqs. ""
+$       then
+$               tap_file_check_period   ==      default_tap_file_check_period
+$               status  ==      3
+$               exit
+$       endif
+$!
+$       temp    =       ""
+$       temp    =       f$cvtime(tap_file_check_period)
+$!
+$       if      temp .eqs. ""
+$       then
+$               tap_file_check_period   ==      default_tap_file_check_period
+$               status  ==      5
+$       endif
+$!
+$       exit
+$!
+$       ENDSUBROUTINE
+$!
+$!******************************************************************************
+$!******************************************************************************
+$!
+$       ORACLE:         SUBROUTINE
+$!
+$       status  ==      1
+$!
+$       if      f$mode()  .eqs.  "INTERACTIVE"  then  define/user  sys$output nl:
+$       sqlplus /
+        exit    77
+$!
+$       if      $status .ne. 77 then status == 3
+$!
+$       exit
+$!
+$       ENDSUBROUTINE
+$!
+$!******************************************************************************
+$!******************************************************************************
+$!
+$       IBCC:   SUBROUTINE
+$!
+$       status  ==      1
+$!
+$       tap_ibcc_file_warning_limit     ==      f$trnlnm("tap_ibcc_file_warning_limit")
+$!
+$       if      tap_ibcc_file_warning_limit .eqs. "" then pipe/trust status == 3 ; exit
+$!
+$       if      f$integer(tap_ibcc_file_warning_limit) .eq. 0 then pipe/trust status == 5 ; exit
+$!
+$       c       =       0
+$!
+$ count:
+$!
+$       file    =       f$search("tap_ib_receive_from_sdm:ibr*.dat;*")
+$!
+$       if      file .nes. ""
+$       then
+$               c       =       c + 1
+$               if      c .gt. tap_ibcc_file_warning_limit
+$               then
+$                       status  ==      7
+$                       exit
+$               endif
+$               goto    count
+$       endif
+$!
+$       exit
+$!
+$       ENDSUBROUTINE
+$!
+$!******************************************************************************
+$!******************************************************************************
+$!
+$       OBCC:   SUBROUTINE
+$!
+$       status  ==      1
+$!
+$       tap_obcc_file_warning_limit     ==      f$trnlnm("tap_obcc_file_warning_limit")
+$!
+$       if      tap_obcc_file_warning_limit .eqs. "" then pipe/trust status == 3 ; exit
+$!
+$       if      f$integer(tap_obcc_file_warning_limit) .eq. 0 then pipe/trust status == 5 ; exit
+$!
+$       c       =       0
+$!
+$ count_cd:
+$!
+$       file    =       f$search("tap_ob_receive_from_dch:cd*.dat;*")
+$!
+$       if      file .nes. ""
+$       then
+$               c       =       c + 1
+$               if      c .gt. tap_obcc_file_warning_limit
+$               then
+$                       status  ==      7
+$                       exit
+$               endif
+$               goto    count_cd
+$       endif
+$!
+$ count_td:
+$!
+$       file    =       f$search("tap_ob_receive_from_dch:td*.dat;*")
+$!
+$       if      file .nes. ""
+$       then
+$               c       =       c + 1
+$               if      c .gt. tap_obcc_file_warning_limit
+$               then
+$                       status  ==      7
+$                       exit
+$               endif
+$               goto    count_td
+$       endif
+$!
+$       exit
+$!
+$       ENDSUBROUTINE
+$!
+$!******************************************************************************
+$!******************************************************************************
+$!
+$       ROWCOUNTS:              SUBROUTINE
+$!
+$       status  ==      1
+$!
+$!v1.0 changed as given below:  define/nolog/job        taptemp         tap_wrk_dir:tap_monitor.'pid'
+$       define/nolog/job        taptemp         tap_wrk_dir:tap_monitor.lis
+$!
+$       set     noon
+$!
+$       define/user     sys$output      nl:
+$       define/user     sys$error       nl:
+$!
+$! Sahara - removed following:
+$!                      select  'IBVP-'||count(*) from incoming_inbound_call_files where iicf_call_file_status_id = 'AP';
+$!                      select  'IBSP-'||count(*) from incoming_inbound_call_files where iicf_call_file_status_id = 'AS';
+$!
+$! Code changes for Oracle 10g issue.
+$!      sqlplus -s / @nl:
+$       sqlplus -s /
+                whenever sqlerror exit sql.sqlcode
+                whenever oserror exit oscode
+                set termout off
+                set head off
+                set echo off
+                set verify off
+                set feedback off
+                set pagesize 0
+
+                spool taptemp
+
+                        select  'OBVP-'||count(*) from incoming_outbound_call_files where iocf_call_file_status_id = 'AP';
+                        select  'OBSP-'||count(*) from incoming_outbound_call_files where iocf_call_file_status_id = 'AS';
+                        select  'GAPQ-'||tsc_batch_queue  from tap_system_configuration where tsc_process_code = 'GAPS';
+                        select  'GAPN-'||tsc_process_name from tap_system_configuration where tsc_process_code = 'GAPS';
+                        select  'GSDQ-'||tsc_batch_queue  from tap_system_configuration where tsc_process_code = 'GSDM';
+                        select  'GSDN-'||tsc_process_name from tap_system_configuration where tsc_process_code = 'GSDM';
+
+                spool off
+
+                exit 77
+$!
+$       if      $status .ne. 77 then pipe/trust status == 3 ; exit
+$!
+$!      ibvp    ==      0
+$       obvp    ==      0
+$!      ibsp    ==      0
+$       obsp    ==      0
+$       gapq    ==      ""
+$       gapn    ==      ""
+$       gsdq    ==      ""
+$       gsdn    ==      ""
+$!
+$       if      f$trnlnm("tapfile") .nes. "" then close/nolog tapfile
+$!
+$       open/read/error=file_error              tapfile         taptemp:
+$!
+$ read_loop:
+$!
+$       read/end=close_file     tapfile         taprec
+$       taprec  =       f$edit(taprec,"COLLAPSE")
+$!
+$       which   =       f$element(0,"-",taprec)
+$       'which' ==      f$element(1,"-",taprec)
+$!
+$       goto    read_loop
+$!
+$ file_error:
+$!
+$       status  ==      5
+$!
+$ close_file:
+$!
+$       if      f$trnlnm("tapfile") .nes. "" then close/nolog tapfile
+$       delete/nolog    taptemp:;*
+$!
+$       exit
+$!
+$       ENDSUBROUTINE
+$!
+$!******************************************************************************
+$!******************************************************************************
+$!
+$! Sahara - removed following:
+$!      IBVP:   SUBROUTINE
+$!
+$!      status  ==      1
+$!
+$!      tap_ibvp_file_warning_limit     ==      f$trnlnm("tap_ibvp_file_warning_limit")
+$!      if      tap_ibvp_file_warning_limit .eqs. "" then pipe/trust status == 3 ; exit
+$!
+$!      if      f$integer(tap_ibvp_file_warning_limit) .eq. 0 then pipe/trust status == 5 ; exit
+$!
+$!      if      ibvp .gt. tap_ibvp_file_warning_limit then status == 7
+$!
+$!      exit
+$!
+$!      ENDSUBROUTINE
+$!
+$!******************************************************************************
+$!******************************************************************************
+$!
+$       OBVP:   SUBROUTINE
+$!
+$       status  ==      1
+$!
+$       tap_obvp_file_warning_limit     ==      f$trnlnm("tap_obvp_file_warning_limit")
+$       if      tap_obvp_file_warning_limit .eqs. "" then pipe/trust status == 3 ; exit
+$!
+$       if      f$integer(tap_obvp_file_warning_limit) .eq. 0 then pipe/trust status == 5 ; exit
+$!
+$       if      obvp .gt. tap_obvp_file_warning_limit then status == 7
+$!
+$       exit
+$!
+$       ENDSUBROUTINE
+$!
+$!******************************************************************************
+$!******************************************************************************
+$!
+$! Sahara - removed following:
+$!      IBSP:   SUBROUTINE
+$!
+$!      status  ==      1
+$!
+$!      tap_ibsp_file_warning_limit     ==      f$trnlnm("tap_ibsp_file_warning_limit")
+$!      if      tap_ibsp_file_warning_limit .eqs. "" then pipe/trust status == 3 ; exit
+$!
+$!      if      f$integer(tap_ibsp_file_warning_limit) .eq. 0 then pipe/trust status == 5 ; exit
+$!
+$!      if      ibsp .gt. tap_ibsp_file_warning_limit then status == 7
+$!
+$!      exit
+$!
+$!      ENDSUBROUTINE
+$!
+$!******************************************************************************
+$!******************************************************************************
+$!
+$       OBSP:   SUBROUTINE
+$!
+$       status  ==      1
+$!
+$       tap_obsp_file_warning_limit     ==      f$trnlnm("tap_obsp_file_warning_limit")
+$       if      tap_obsp_file_warning_limit .eqs. "" then pipe/trust status == 3 ; exit
+$!
+$       if      f$integer(tap_obsp_file_warning_limit) .eq. 0 then pipe/trust status == 5 ; exit
+$!
+$       if      obsp .gt. tap_obsp_file_warning_limit then status == 7
+$!
+$       exit
+$!
+$       ENDSUBROUTINE
+$!
+$!******************************************************************************
+$!******************************************************************************
+$!
+$       GAPS:   SUBROUTINE
+$!
+$       status  ==      1
+$!
+$       if      gapq .eqs. "" then pipe/trust status == 3 ; exit
+$       if      gapn .eqs. "" then pipe/trust status == 5 ; exit
+$!
+$       ctx     =       ""
+$       temp    =       f$context("process",ctx,"nodename","*","eql")
+$       temp    =       f$context("process",ctx,"prcnam","tap_gaps_01","eql")
+$!
+$       pid     =       f$pid(ctx)
+$!
+$       if      f$type(ctx) .eqs. "PROCESS_CONTEXT" then temp = f$context ("process", ctx, "cancel")
+$!
+$       if      pid .nes. "" then exit
+$!
+$       set     noon
+$!
+$       submit  -
+                /name="TAP_GAPS_01"                     -
+                /log=tap_log_dir:tap_gaps_01.log        -
+                /queue='gapq'                           -
+                /nonotify                               -
+                /noident                                -
+                /param=("GAPS","01","''gapn'")          -
+        tap_com_dir:tap_job_startup
+$!
+$       if      .not. $status
+$       then
+$               status == 7
+$       else
+$               @tap_com_dir:taplog_mess "    " "''procname' - GAPS, TAP_GAPS_01 has been submitted to queue ''gapq'" "B"
+$       endif
+$!
+$       exit
+$!
+$       ENDSUBROUTINE
+$!
+$!******************************************************************************
+$!******************************************************************************
+$!
+$       GSDM:   SUBROUTINE
+$!
+$       status  ==      1
+$!
+$       if      gsdq .eqs. "" then pipe/trust status == 3 ; exit
+$       if      gsdn .eqs. "" then pipe/trust status == 5 ; exit
+$!
+$       ctx     =       ""
+$       temp    =       f$context("process",ctx,"nodename","*","eql")
+$       temp    =       f$context("process",ctx,"prcnam","tap_gsdm_01","eql")
+$!
+$       pid     =       f$pid(ctx)
+$!
+$       if      f$type(ctx) .eqs. "PROCESS_CONTEXT" then temp = f$context ("process", ctx, "cancel")
+$!
+$       if      pid .nes. "" then exit
+$!
+$       set     noon
+$!
+$       submit  -
+                /name="TAP_GSDM_01"                     -
+                /log=tap_log_dir:tap_gsdm_01.log        -
+                /queue='gsdq'                           -
+                /nonotify                               -
+                /noident                                -
+                /param=("GSDM","01","''gsdn'")          -
+        tap_com_dir:tap_job_startup
+$!
+$       if      .not. $status
+$       then
+$               status == 7
+$       else
+$               @tap_com_dir:taplog_mess "    " "''procname' - GSDM, TAP_GSDM_01 has been submitted to queue ''gsdq'" "B"
+$       endif
+$!
+$       exit
+$!
+$       ENDSUBROUTINE
+$!
+$!******************************************************************************
+$!******************************************************************************
+$!
+$!
+$!                              GENERIC ERROR AND EXIT HANDLER
+$!
+$!
+$ error:
+$!
+$       if      status .eqs. ""
+$       then
+$               status          ==      $status
+$               error_text      =       f$message('status')
+$       else
+$               error_text      =       status
+$       endif
+$!
+$       set     noon
+$!
+$       if      f$mode() .eqs. "INTERACTIVE"
+$       then
+$               wo      "''csi'20;1H''cls'''procname' - ''phase', ''error_text'"
+$               read/prompt="''crlf'Please press ENTER to acknowledge error"  sys$command  status/end=error1
+$           error1:
+$       endif
+$!
+$!
+$       @tap_com_dir:taplog_mess " ***" "''procname' - ''phase', ''error_text'" " "
+$!
+$!
+$       request/to='operator' "''procname' - ''phase', ''error_text'"
+$!
+$!
+$!------------------------------------------------------------------------------
+$!
+$!
+$!                              RESTORE DCL ENVIRONMENT
+$!
+$!
+$ exit:
+$!
+$       phase   =       "EXIT"
+$!
+$       if      f$mode() .eqs. "INTERACTIVE"
+$       then
+$               status  ==      1
+$               wo      cls
+$               set     term/broad
+$               v       =  f$verify('verify')
+$               set     message 'messcodes'
+$               set     default 'defdir'
+$               if      contcodes .nes ""  then set control  =  ('contcodes')
+$       endif
+$!
+$       exit
+$!
+$!
+$!******************************************************************************
+$!******************************************************************************
+[R63_TAPLIVE@dmmlw-esxvm-1048 source_code]$ cat TAP_MONITOR.COM | wc -l
+657
+[R63_TAPLIVE@dmmlw-esxvm-1048 source_code]$

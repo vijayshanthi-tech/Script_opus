@@ -1,0 +1,67 @@
+[R63_TAPLIVE@dmmlw-esxvm-1048 source_code]$ cat TAP_SERVER_STAT.COM
+$ set verify
+$ set noon
+$ set proc/priv=all
+$ set def DISK$USERDISK:[USER.varrej1]
+$ @DISK$USERDISK:[USER.varrej1]DISK_CHECK.COM_1;/out=asma.txt
+$ SEA ASMA.TXT "_DSA10:","_DSA11:","_DSA50:"/out=SERVER_STAT.txt
+$ OPEN/READ/ERROR=READ_ERROR IP_FILE SERVER_STAT.TXT
+$ OPEN/WRITE sftp_file TAPLIV_SERVER_STAT.TXT
+$ v = 0
+$ EFILE= F$SEARCH("DISK$USERDISK:[USER.varrej1]EDLIVE_SERVER_STAT.TXT;*")
+$ TFILE= F$SEARCH("DISK$USERDISK:[USER.varrej1]TAPLIV_SERVER_STAT.TXT;*")
+$ IF TFILE .NES. ""
+$ THEN
+$! DELETE/LOG TAPLIV_SERVER_STAT.TXT;*/BEFORE
+$! ENDIF
+$! IF EFILE .NES. ""
+$! THEN
+$! DELETE/LOG EDLIVE_SERVER_STAT.TXT;*/BEFORE
+$ GOTO READ_LOOP
+$! ELSE
+$! ERROR_STATUS= "EDLIVE SERVER STAT NOT FOUND PLEASE RUN THE SER_STAT SCRIPT FROM FLAMUSER AND TRY AGAIN"
+$! SH SYM ERROR_STATUS
+$! GOTO READ_LOOP
+$ ENDIF
+$ READ_LOOP:
+$ READ/END_OF_FILE=ENDIT IP_FILE READ_LINE
+$ a_'v' = f$extract(0,8,READ_LINE)+" "+f$extract(18,13,READ_LINE)+" "+f$extract(46,12,READ_LINE)
+$ sh sym a_'v'
+$ WRITE sftp_file a_'v'
+$ v= v+1
+$ GOTO READ_LOOP
+$ ENDIT:
+$ CLOSE IP_FILE
+$ CLOSE sftp_file
+$ encode_1 == "$sys$system:tcpip$uuencode.exe"
+$ encode_1 TAPLIV_SERVER_STAT.TXT TAPLIV_SERVER_STAT.ENC
+$ MAIL/sub="SERVER_STATS_TAPLIV" TAPLIV_SERVER_STAT.ENC -
+  "@EMAIL.DIS;"
+$ IF EFILE .EQS. ""
+$ THEN
+$ ERROR_STATUS= "EDLIVE SERVER STAT NOT FOUND PLEASE RUN THE SER_STAT SCRIPT FROM FLAMUSER AND TRY AGAIN"
+$ SH SYM ERROR_STATUS
+$ GOTO EXIT
+$ ELSE
+$ encode_1 EDLIVE_SERVER_STAT.TXT EDLIVE_SERVER_STAT.ENC
+$ MAIL/sub="SERVER_STATS_EDLIV" EDLIVE_SERVER_STAT.ENC -
+  "@EMAIL.DIS;"
+$ GOTO EXIT
+$ ENDIF
+$ READ_ERROR:
+$ WRITE "ERROR WHILE READING TXT"
+$ CLOSE IP_FILE
+$ CLOSE sftp_file
+$ GOTO EXIT
+$ EXIT:
+$ CLOSE IP_FILE
+$ CLOSE sftp_file
+$ WhichDay = F$Cvt("TODAY+31-","ABSOLUTE","DATE")
+$ MonthFirst =  F$Cvtime( F$Cvtime( WhichDay + -
+                                "-"+F$Cvtime( WhichDay,,"DAY")+"-", -
+                                "ABSOLUTE","DATE") + -
+                                "+1-","ABSOLUTE","DATE")
+$ SecLastOfNextMonth = f$cvtime( "1-" + f$extract(2,8,f$cvtime("28--+35-","absolute","date")) + "-2-","absolute","date")
+$ SUBMIT/LOG=DISK$CALL_DATA:[TAP.LOG]TAP_SERVER_STAT.LOG DISK$USERDISK:[USERS.TAPLIVE]TAP_SERVER_STAT.COM;/USER=TAPLIVE/AFTER="''SecLastOfNextMonth'+08:00:00"/NOTIFY
+$ exit
+[R63_TAPLIVE@dmmlw-esxvm-1048 source_code]$

@@ -1,0 +1,26 @@
+# Expected email subjects (golden master reference)
+# These subjects are sent via mailx and must match the VMS original exactly.
+
+# --- Directory backlog alerts (send_alert — empty body) ---
+No Call files processed by TAP collection in last four hours
+There are <N> files in tap collection
+There are <N> files in TAP pricing
+There are <N> files in TAP spliting
+There are <N> files in TAP Distribute for spid <NNN>
+
+# --- Zero RSERC alert ---
+There are no RSERC created in last 4 hours
+
+# --- RSERC failure alerts (send_report — file body) ---
+RSERC Failure - Procedure 841 - *.DON files left out
+RSERC Failure - Procudure 841 - *.TMP files left out - Recovering
+
+# --- Hourly report emails (send_report — spool file body) ---
+TAP - Processed RESRC File Report
+TAP - Processed roaming CDRs Report
+
+# Notes:
+# - "Procudure" is the original VMS typo — preserved intentionally.
+# - "spliting" (single t) is preserved from the VMS original.
+# - <N> is replaced by the actual file count at runtime.
+# - <NNN> is the zero-padded 3-digit SP_ID.

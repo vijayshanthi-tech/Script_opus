@@ -1,0 +1,264 @@
+
+$ SET NOVERIFY
+$ SET NOON
+$ !
+$ !     COMMAND:  USAGE.COM               CPU:               Digital VAX, Alpha, Itanium, Integrity
+$ !
+$ !     CREATED:  30 JUN 10               OPERATING SYSTEM:  OpenVMS Version 8.4
+$ !
+$ !     VERSION:  1.0                     LANGUAGE:          DCL
+$ !
+$ !     REVISED:                          AUTHOR:            Thomas M. Maloney
+$ !
+$ !     ***********************************************************
+$ !     *    M O D I F I C A T I O N    H I S T O R Y    L O G    *
+$ !     ***********************************************************
+$ !
+$ !     DATE          REV     WHO     DESCRIPTION OF MODIFICATION
+$ !     ---------     ---     ---     ---------------------------
+$ !     30 JUN 10     1.0     TMM     Incept date.
+$ !
+$ !     ****************************************************
+$ !     *    P R O C E D U R E    D E S C R I P T I O N    *
+$ !     ****************************************************
+$ !
+$ !     USAGE.COM generates a list of disks containing the device name, volume
+$ !     label, device type, max blocks, free blocks, percentage of free blocks,
+$ !     used blocks, percentage of used blocks and a video (default) or textual
+$ !     percentage graph of either used (default) or free blocks.
+$ !
+$ !     Parameters:
+$ !
+$ !        P1   Percentage Graph Data
+$ !
+$ !             Where:   U = Used Percentage (Default)
+$ !                      F = Free Percentage
+$ !
+$ !        P2   Display Type
+$ !
+$ !             Where:   G = Graphical Display (Default)
+$ !                      T = Textual Display
+$ !
+$ !     Examples:
+$ !
+$ !        $ @USAGE F G      ! Generates a video percentage graph of free blocks.
+$ !        $ @USAGE F T      ! Generates a textual percentage graph of free blocks.
+$ !        $ @USAGE U G      ! Generates a video percentage graph of used blocks.
+$ !        $ @USAGE U T      ! Generates a textual percentage graph of used blocks.
+$ !        $ @USAGE          ! Generates a video percentage graph of used blocks.
+$ !
+$ !     *************************************
+$ !     *    I N I T I A L I Z A T I O N    *
+$ !     *************************************
+$ !
+$ INITIALIZATION:
+$ !
+$ !     Parameters
+$ !
+$ PASSED1   = F$EXTRACT(0,1,"''P1'")
+$ PASSED2   = F$EXTRACT(0,1,"''P2'")
+$ !
+$ GRAPH     = "Used"      ! Used Space By Default
+$ VIDEO     = "Yes"       ! Video Display By Default
+$ !
+$ IF PASSED1 .EQS. "U" THEN GRAPH = "Used"
+$ IF PASSED1 .EQS. "F" THEN GRAPH = "Free"
+$ !
+$ IF PASSED2 .EQS. "G" THEN VIDEO = "Yes"
+$ IF PASSED2 .EQS. "T" THEN VIDEO = "No"
+$ !
+$ !     Device Attributes
+$ !
+$ ESC[0,32] = %X1B
+$ CR[0,32]  = %X0D
+$ LF[0,32]  = %X0A
+$ !
+$ HOME      = "[0;0H"
+$ BOTTOM    = "[20;0H"
+$ CLEAR     = "[J"
+$ !
+$ VTOFF     = "[0m"
+$ VTON      = "[1;7m"
+$ !
+$ DHTOP     = "#3"
+$ DHBOT     = "#4"
+$ DWSIN     = "#6"
+$ !
+$ CLS       = F$FAO("!4(AS)",ESC,HOME,ESC,CLEAR)
+$ SKIP      = F$FAO("!2(AS)",CR,LF)
+$ !
+$ !     Messages
+$ !
+$ COMTXT    = "OpenVMS    System Manager    Version 8.4"
+$ MODTXT    = "Disk Usage"
+$ !
+$ COMMSG    = F$FAO("!8(AS)",ESC,DHTOP,COMTXT,CR,LF,ESC,DHBOT,COMTXT)
+$ MODMSG    = F$FAO("!3(AS)",ESC,DWSIN,MODTXT)
+$ !
+$ !     Commands
+$ !
+$ DISPLAY  := WRITE SYS$OUTPUT
+$ !
+$ !     Other
+$ !
+$ SPACES    = "                                "
+$ HASHES    = "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+$ !
+$ !     **************************************
+$ !     *    D I S P L A Y    H E A D E R    *
+$ !     **************************************
+$ !
+$ DISPLAY_HEADER:
+$ !
+$ !     Write Display Header
+$ !
+$ IF VIDEO .EQS. "Yes"
+$ THEN
+$      DISPLAY CLS
+$      DISPLAY COMMSG
+$      DISPLAY ""
+$      DISPLAY MODMSG
+$      DISPLAY ""
+$ ELSE
+$      DISPLAY CLS
+$      DISPLAY COMTXT
+$      DISPLAY ""
+$      DISPLAY MODTXT
+$      DISPLAY ""
+$ ENDIF
+$ !
+$ !     **********************************
+$ !     *    D I S P L A Y    H E L P    *
+$ !     **********************************
+$ !
+$ DISPLAY_HELP:
+$ !
+$ IF (PASSED1 .NES. "U" .AND. PASSED1 .NES. "F" .AND. PASSED1 .NES. "") .OR. -
+(PASSED2 .NES. "G" .AND. PASSED2 .NES. "T" .AND. PASSED2 .NES. "")
+$ THEN
+$      DISPLAY "Syntax is:"
+$      DISPLAY ""
+$      DISPLAY "@USAGE [graph] [display]"
+$      DISPLAY ""
+$      DISPLAY "Where [graph] Is:   U = Used Percentage (Default)"
+$      DISPLAY "                    F = Free Percentage"
+$      DISPLAY ""
+$      DISPLAY "And [display] Is:   G = Graphical Display (Default)"
+$      DISPLAY "                    T = Textual Display"
+$      DISPLAY ""
+$      DISPLAY "Examples:           $ @USAGE F G   -   Generates a video percentage graph of free blocks"
+$      DISPLAY "                    $ @USAGE F T   -   Generates a textual percentage graph of free blocks."
+$      DISPLAY "                    $ @USAGE U G   -   Generates a video percentage graph of used blocks."
+$      DISPLAY "                    $ @USAGE U T   -   Generates a textual percentage graph of used blocks."
+$      DISPLAY "                    $ @USAGE       -   Generates a video percentage graph of used blocks."
+$      DISPLAY ""
+$      GOTO END
+$ ENDIF
+$ !
+$ !     **************************************
+$ !     *    G E N E R A T E    L I S T    *
+$ !     **************************************
+$ !
+$ GENERATE_LIST:
+$ !
+$ DISPLAY "Disk Spage Usage For ", F$GETSYI("NODENAME"), " at ", F$TIME()
+$ DISPLAY ""
+$ DISPLAY "================   ============   ====================   =========   ================   ================   ===================="
+$ DISPLAY "Device             Volume         Type                     Maximum               Free               Used   % ", GRAPH, " Graph"
+$ DISPLAY "================   ============   ====================   =========   ================   ================   ===================="
+$ !
+$ !     Disk Loop Start
+$ !
+$ DISK_LOOP_START:
+$ !
+$ !     Get Next Disk
+$ !
+$ DISK        = F$DEVICE(,"DISK")
+$ !
+$ IF DISK .EQS. "" THEN GOTO DISK_LOOP_END
+$ !
+$ SHDW_MEMBER = F$GETDVI("''DISK'","SHDW_MEMBER")
+$ MOUNTCNT    = F$GETDVI(DISK,"MOUNTCNT")
+$ DEVCLASS    = F$GETDVI(DISK,"DEVCLASS")
+$ !
+$ IF MOUNTCNT .EQ. 0 .OR. DEVCLASS .NE. 1 .OR. SHDW_MEMBER .EQS. "TRUE" THEN GOTO DISK_LOOP_START
+$ !
+$ !     Calculate Usage
+$ !
+$ DEVNAM = DISK + F$EXTRACT(1,16-F$LENGTH(DISK),SPACES)
+$ VOLNAM = F$GETDVI("''DISK'","VOLNAM") + F$EXTRACT(1,12-F$LENGTH(F$GETDVI("''DISK'","VOLNAM")),SPACES)
+$ DEVTYP = F$GETDVI("''DISK'","DEVICE_TYPE_NAME") + F$EXTRACT(1,20-F$LENGTH(F$GETDVI("''DISK'","DEVICE_TYPE_NAME")),SPACES)
+$ MAXBLK = F$EXTRACT(1,9-F$LENGTH(F$STRING(F$GETDVI("''DISK'","MAXBLOCK"))),SPACES) + F$STRING(F$GETDVI("''DISK'","MAXBLOCK"))
+$ !
+$ FREBLK = F$EXTRACT(1,9-F$LENGTH(F$STRING(F$GETDVI("''DISK'","FREEBLOCKS"))),SPACES) + F$STRING(F$GETDVI("''DISK'","FREEBLOCKS"))
+$ FRETST = FREBLK / ( MAXBLK / 1000 )
+$ IF F$EXTRACT(2,1,FRETST) .GE. 5
+$ THEN
+$      FREPCT = ( FREBLK / ( MAXBLK / 100 ) ) + 1
+$ ELSE
+$      FREPCT = FREBLK / ( MAXBLK / 100 )
+$ ENDIF
+$ DSPFRE = F$EXTRACT(1,3-F$LENGTH(F$STRING(FREPCT)),SPACES) + F$STRING(FREPCT)
+$ !
+$ USDBLK = F$GETDVI("''DISK'","MAXBLOCK") - F$GETDVI("''DISK'","FREEBLOCKS")
+$ DSPUSG = F$EXTRACT(1,9-F$LENGTH(F$STRING(USDBLK)),SPACES) + F$STRING(USDBLK)
+$ USDPCT = 100 - FREPCT
+$ DSPUSD = F$EXTRACT(1,3-F$LENGTH(F$STRING(USDPCT)),SPACES) + F$STRING(USDPCT)
+$ !
+$ !     Create Percentage Bar
+$ !
+$ IF GRAPH .EQS. "Used"
+$ THEN
+$      IF VIDEO .EQS. "Yes"
+$      THEN
+$           USDBAR = F$EXTRACT(1,USDPCT/5,SPACES)
+$           DSPBAR = F$FAO("!5(AS)",ESC,VTON,USDBAR,ESC,VTOFF)
+$      ELSE
+$           USDBAR = F$EXTRACT(1,USDPCT/5,HASHES)
+$           DSPBAR = USDBAR
+$      ENDIF
+$ ELSE
+$      IF VIDEO .EQS. "Yes"
+$      THEN
+$           FREBAR = F$EXTRACT(1,FREPCT/5,SPACES)
+$           DSPBAR = F$FAO("!5(AS)",ESC,VTON,FREBAR,ESC,VTOFF)
+$      ELSE
+$           FREBAR = F$EXTRACT(1,FREPCT/5,HASHES)
+$           DSPBAR = FREBAR
+$      ENDIF
+$ ENDIF
+$ !
+$ !     Display Details
+$ !
+$ DISPLAY DEVNAM, "   ", VOLNAM, "   ", FREBLK, "    ", DSPUSG, "   ", DSPUSD, "%   "
+$ !
+$ !     Rinse and Repeat
+$ !
+$ GOTO DISK_LOOP_START
+$ !
+$ !     Disk Loop End
+$ !
+$ DISK_LOOP_END:
+$ !
+$ !     Write Display Trailer
+$ !
+$ DISPLAY "================   ============   ====================   =========   ================   ================   ===================="
+$ DISPLAY ""
+$ !
+$ !     ***************
+$ !     *    E N D    *
+$ !     ***************
+$ !
+$ END:
+$ !
+$ EXIT
+
+Kind Regards,
+Vijayashanthi Brabhaharan| Virgin Media O2 UK
+L3 Support | LDAP 
+Mobile: +91 (0)9629232425
+Email: Vijayashanthi.Brabhaharan1@virginmediao2.co.uk
+ 
+ 
+
+

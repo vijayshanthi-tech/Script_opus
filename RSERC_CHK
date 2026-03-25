@@ -1,0 +1,239 @@
+[R63_TAPLIVE@dmmlw-esxvm-1048 source_code]$ cat RSERC_CHK.COM
+$ set proc/priv=all
+$ set noverify
+$ submit/after=tomorrow"+6"/keep/log=tap_log_dir:rserc_chk.log/noprint rserc_chk.com
+$ set noon
+$ run_count=0
+$ max=400
+$ split_max=600
+$ wso="write sys$output"
+$ dttm=f$time()
+$ wso "''dttm' - RSERC CHK started"
+$ wso "Creating SPID list"
+$ sqlplus -s /
+set verify off
+set feedback off
+set termout off
+set pagesize 0
+SPOOL spid_list.lis
+select SP_ID from service_providers;
+SPOOL OFF
+EXIT
+$!
+$ start:
+$ dttm=f$time()
+$ wso "''dttm' - Checking TAP directories"
+$ run_count = run_count + 1
+$ dir DISK$CALL_DATA2:[TAP.OB.ARCHIVE]cd*.dat/sin="-4"/tot/nohead
+$ if $status .nes. "%X00000001"
+$ then
+$ mail NL: "Telefonica_UK.L2@accenture.com"/sub="No Call files processed by TAP collection in last four hours"
+$ wso "No Call files processed by TAP collection in last four hours"
+$ endif
+$!
+$ notify_check:
+$ dir DISK$CALL_DATA:[TAP.OB.COLLECT]CD%%%%%GBRCN*.dat/noout
+$ if $status .eqs. "%X00000001"
+$ then
+$ pip dir DISK$CALL_DATA:[TAP.OB.COLLECT]CD%%%%%GBRCN*.dat/tot | sea sys$input "Total of " | (read sys$pipe line ; lines=f$element(2," ",f$extract(0,30,line)) ; define/job file_count &lines)
+$ total_files= f$integer(F$TRNLNM("file_count"))
+$       if total_files .gt. max
+$       then
+$       mail NL: "Telefonica_UK.L2@accenture.com"/sub="There are ''total_files' files in tap collection"
+$       wso "There are ''total_files' files in tap collection"
+$       endif
+$ endif
+$!
+$ to_price_check:
+$ dir DISK$CALL_DATA:[TAP.OB.TO_PRICE]CD%%%%%GBRCN*.DAT/noout
+$ if $status .eqs. "%X00000001"
+$ then
+$ pip dir DISK$CALL_DATA:[TAP.OB.TO_PRICE]CD%%%%%GBRCN*.DAT/tot | sea sys$input "Total of " | (read sys$pipe line ; lines=f$element(2," ",f$extract(0,30,line)) ; define/job file_count &lines)
+$ total_files= f$integer(F$TRNLNM("file_count"))
+$       if total_files .gt. max
+$       then
+$       mail NL: "Telefonica_UK.L2@accenture.com"/sub="There are ''total_files' files in TAP pricing"
+$       wso "There are ''total_files' files in TAP pricing"
+$       endif
+$ endif
+$!
+$ priced_check:
+$ dir DISK$CALL_DATA:[TAP.OB.PRICED]CD%%%%%GBRCN*.PRC/noout
+$ if $status .eqs. "%X00000001"
+$ then
+$ pip dir DISK$CALL_DATA:[TAP.OB.PRICED]CD%%%%%GBRCN*.PRC/tot | sea sys$input "Total of " | (read sys$pipe line ; lines=f$element(2," ",f$extract(0,30,line)) ; define/job file_count &lines)
+$ total_files= f$integer(F$TRNLNM("file_count"))
+$       if total_files .gt. max
+$       then
+$       mail NL: "Telefonica_UK.L2@accenture.com"/sub="There are ''total_files' files in TAP spliting"
+$       wso "There are ''total_files' files in TAP spliting"
+$       endif
+$ endif
+$!
+$ open/read inpfile spid_list.lis
+$ loop:
+$ read/end=exit1 inpfile inpro
+$ spid = f$fao("!3ZL",f$integer(f$edit(inpro,"trim")))
+$ dir DISK$CALL_DATA:[TAP.OB.SPLIT.'spid']CD*.SPLIT/tot
+$ if $status .eqs. "%X00000001"
+$ then
+$ pip dir DISK$CALL_DATA:[TAP.OB.SPLIT.'spid']CD*.SPLIT/tot | sea sys$input "Total of " | (read sys$pipe line ; lines=f$element(2," ",f$extract(0,30,line)) ; define/job file_count &lines)
+$ total_files= f$integer(F$TRNLNM("file_count"))
+$       if total_files .gt. split_max
+$       then
+$       mail NL: "Telefonica_UK.L2@accenture.com"/sub="There are ''total_files' files in TAP Distribute for spid ''spid'"
+$       wso "There are ''total_files' files in TAP Distribute for spid ''spid'"
+$       endif
+$ endif
+$ goto loop
+$ exit1:
+$ close inpfile
+$!
+$ Rserc_created_and_CDRs_processed:
+$ dttm=f$time()
+$ wso "''dttm' - Creating Tap hourly reports"
+$ sqlplus -s /
+SET VERIFY OFF
+SET FEEDBACK OFF
+SET PAGESIZE 1
+BREAK ON DAT SKIP 1
+SET NUMFORMAT 9,999,999,990
+COMPUTE SUM LABEL 'DAY TOTAL' OF FILES_PROCESSED ON DAT
+SET TRANSACTION READ ONLY;
+SPOOL files_created.lis
+SET HEADING OFF;
+SELECT ' ** Tap hourly report ** ' FROM DUAL;
+SET HEADING ON;
+SELECT TO_CHAR(SYSDATE, 'DD-MON-YYYY HH24:MI:SS') DATE_TIME FROM DUAL;
+SELECT 'DATE            HOUR     FILES_PROCESSED' FROM DUAL;
+select substr(to_CHAR(OOCF_CREATED_DTTM,'YYYY-MM-DD HH24'),1,10) DAT ,
+substr(to_CHAR(OOCF_CREATED_DTTM,'YYYY-MM-DD HH24'),12,2) HOUR_OF_THE_DAY,
+count(*) FILES_PROCESSED from outgoing_outbound_call_files where
+trunc(OOCF_CREATED_DTTM)=trunc(sysdate)
+group by to_CHAR(OOCF_CREATED_DTTM,'YYYY-MM-DD HH24')
+order by to_CHAR(OOCF_CREATED_DTTM,'YYYY-MM-DD HH24');
+SPOOL OFF
+SET NUMFORMAT 999999999
+SPOOL files_created1.lis
+select 'FILE_COUNT=',count(*) from outgoing_outbound_call_files
+where trunc(OOCF_CREATED_DTTM)=trunc(sysdate-4/24);
+SPOOL OFF
+BREAK ON DATR SKIP 1
+SET NUMFORMAT 9,999,999,990
+COMPUTE SUM LABEL 'DAY TOTAL' OF RECORDS_PROCESSED ON DATR
+SPOOL recs_created.lis
+SET HEADING OFF;
+SELECT ' ** Tap hourly report for incoming roaming CDRs** ' FROM DUAL;
+SET HEADING ON;
+SELECT TO_CHAR(SYSDATE, 'DD-MON-YYYY HH24:MI:SS') DATE_TIME FROM DUAL;
+SELECT 'DATE            HOUR     RECORDS_PROCESSED' FROM DUAL;
+select substr(to_CHAR(PS_RUN_DTTM,'YYYY-MM-DD HH24'),1,10) DATR ,
+substr(to_CHAR(PS_RUN_DTTM,'YYYY-MM-DD HH24'),12,2) HOUR_OF_THE_DAY,
+sum(PS_RECORD_COUNT) RECORDS_PROCESSED from PROCESS_STATISTICS where
+trunc(PS_RUN_DTTM)=trunc(sysdate) and PS_PROCESS_NAME='PRICING'
+group by to_CHAR(PS_RUN_DTTM,'YYYY-MM-DD HH24')
+order by to_CHAR(PS_RUN_DTTM,'YYYY-MM-DD HH24');
+SPOOL OFF
+EXIT
+$!
+$ MAIL/SUBJ="TAP - Processed RESRC File Report" files_created.lis "Telefonica_UK.L2@accenture.com"
+$ wso "TAP - Processed RESRC File Report sent to L2"
+$ MAIL/SUBJ="TAP - Processed roaming CDRs Report" recs_created.lis "Telefonica_UK.L2@accenture.com"
+$ MAIL/SUBJ="TAP - Processed roaming CDRs Report" recs_created.lis "VMO2_ApolloL2@accenture.com"
+$ wso "TAP - Processed roaming CDRs Report sent to L2"
+$!
+$ rserc_check:
+$ pipe search files_created1.lis "FILE_COUNT=" | (read sys$pipe line ; lines=f$integer(f$edit(f$extract(11,f$length(line)-11,line),"trim")) ; define/job file_count &lines)
+$ total_files= f$integer(F$TRNLNM("file_count"))
+$ if total_files .eq. 0 .and. run_count .ne. 1
+$ then
+$       mail NL: "Telefonica_UK.L2@accenture.com"/sub="There are no RSERC created in last 4 hours"
+$       wso "There are no RSERC created in last 4 hours"
+$ endif
+$ delete files_created.lis;*
+$ delete files_created1.lis;*
+$ deassign/job file_count
+$ dttm=f$time()
+$ last_hour=f$extract(12,2,dttm)
+$!
+$ start_1:
+$ dttm=f$time()
+$ wso "''dttm' - Checking for RSERC failures"
+$ sh que *ass*/out=rserc_chk.lis
+$ sea rserc_chk.lis dist
+$ if $status .eqs. "%X00000001"
+$ then
+$       goto check_hour
+$ else
+$       dir tap_outgoing_sp:*.don;*
+$       if $status .eqs. "%X00000001"
+$       then
+$               dir/out=rserc_failure_2.txt tap_outgoing_sp:*.don;*
+$               mail rserc_failure_2.txt "sdcmg1::smtp%""TAPSupport@o2.com"""/sub="RSERC Failure - Procedure 841 - *.DON files left out"
+$               mail rserc_failure_2.txt "sdcmg1::smtp%""Telefonica_UK.L2@accenture.com"""/sub="RSERC Failure - Procedure 841 - *.DON files left out"
+$               wso "RSERC Failure - Procedure 841 - *.DON files left out"
+$       endif
+$!
+$       dir tap_outgoing_sp:*.tmp;*
+$       if $status .eqs. "%X00000001"
+$       then
+$               dir/out=rserc_failure_1.txt tap_outgoing_sp:*.tmp;*
+$               mail rserc_failure_1.txt "sdcmg1::smtp%""TAPSupport@o2.com"""/sub="RSERC Failure - Procudure 841 - *.TMP files left out - Recovering"
+$               mail rserc_failure_1.txt "sdcmg1::smtp%""Telefonica_UK.L2@accenture.com"""/sub="RSERC Failure - Procudure 841 - *.TMP files left out - Recovering"
+$               wso "RSERC Failure - Procudure 841 - *.TMP files left out - Recovering"
+$!rerun failed rsercs
+$!
+$!               stop/que/next TAP$OB$ASSEMB$G2$TAPLIV
+$!               stop/que/next TAP$OB$ASSEMB$G3$TAPLIV
+$!
+$               dir/nohead/notrail tap_outgoing_sp:mrlog*.tmp;*/excl=*.dat/out=mrlog.lis
+$               del tap_outgoing_sp:*.tmp;*
+$               del tap_ob_period:*.tmp;*
+$               sort/nodup/key=(pos:35,siz=3) mrlog.lis;1 mrlog.lis;2
+$               open/read infile mrlog.lis
+$ next_spid:
+$               read/end=no_more_spids infile rec
+$               sp_id = f$extract(34,3,rec)
+$               sqlplus -s / @rerun_rserc "''sp_id'"
+$               goto next_spid
+$ no_more_spids:
+$               close infile
+$               del mrlog.lis;*
+$!chk_ass_que:
+$!              wait 00:03:00
+$!              sh que *ass*/out=rserc_chk.lis
+$!              sea rserc_chk.lis dist
+$!              if $status .eqs. "%X00000001"
+$!              then
+$!                      goto chk_ass_que
+$!              else
+$!                      start/que TAP$OB$ASSEMB$G2$TAPLIV
+$!                      start/que TAP$OB$ASSEMB$G3$TAPLIV
+$!              endif
+$       endif
+$ endif
+$!
+$ check_hour:
+$ dttm=f$time()
+$ cur_hour=f$extract(12,2,dttm)
+$ if cur_hour .eqs. "23"
+$ then
+$       goto finish
+$ endif
+$ if cur_hour .gt. last_hour
+$ then
+$       goto start
+$ endif
+$ wso "''dttm' - Waiting for 10 mins"
+$ wait 00:10:00
+$ goto start_1
+$!
+$ finish:
+$ wso "''dttm' - RSERC_CHK completed"
+$ del/bef="-30-" tap_log_dir:rserc_chk.log;*
+$ del rserc_failure*.txt;*
+$ del rserc_chk.lis;*
+$ delete spid_list.lis;*
+$ exit
+$!
+[R63_TAPLIVE@dmmlw-esxvm-1048 source_code]$

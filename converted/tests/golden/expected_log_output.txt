@@ -1,0 +1,20 @@
+# Expected log line format: DD-Mon-YYYY HH:MM:SS - <message>
+# Example golden master log entries (for visual comparison)
+15-Jan-2025 06:00:01 - RSERC CHK started
+15-Jan-2025 06:00:01 - Creating SPID list
+15-Jan-2025 06:00:02 - Checking TAP directories
+15-Jan-2025 06:00:03 - No Call files processed by TAP collection in last four hours
+15-Jan-2025 06:00:03 - There are 450 files in tap collection
+15-Jan-2025 06:00:04 - There are 500 files in TAP pricing
+15-Jan-2025 06:00:04 - There are 420 files in TAP spliting
+15-Jan-2025 06:00:04 - There are 650 files in TAP Distribute for spid 042
+15-Jan-2025 06:00:05 - Creating Tap hourly reports
+15-Jan-2025 06:00:06 - TAP - Processed RESRC File Report sent to L2
+15-Jan-2025 06:00:06 - TAP - Processed roaming CDRs Report sent to L2
+15-Jan-2025 06:00:06 - There are no RSERC created in last 4 hours
+15-Jan-2025 06:10:07 - Checking for RSERC failures
+15-Jan-2025 06:10:07 - RSERC Failure - Procedure 841 - *.DON files left out
+15-Jan-2025 06:10:08 - RSERC Failure - Procudure 841 - *.TMP files left out - Recovering
+15-Jan-2025 06:10:08 - Re-running RSERC for SP_ID: 042
+15-Jan-2025 06:10:08 - Waiting for 10 mins
+15-Jan-2025 23:00:01 - RSERC_CHK completed
