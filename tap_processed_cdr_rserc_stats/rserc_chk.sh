@@ -1,28 +1,54 @@
 #!/bin/bash
 ###############################################################################
-# Script Name  : rserc_chk.sh
-# Converted From: RSERC_CHK.COM (VMS DCL)
-# Description   : Monitors TAP outbound processing directories for file
-#                 backlog, generates hourly RSERC/CDR reports via Oracle,
-#                 emails alerts and reports, and auto-recovers failed RSERCs.
-#                 Runs continuously from 06:00 until 23:00 each day,
-#                 re-submitting itself for the next day at 06:00.
+# Script Name    : rserc_chk.sh
+# Converted From : RSERC_CHK.COM (OpenVMS DCL)
+# Description    : Monitors TAP outbound processing directories for file
+#                  backlog, generates hourly RSERC/CDR reports via Oracle,
+#                  emails alerts and reports, and auto-recovers failed RSERCs.
+#                  Runs continuously from 06:00 until 23:00 each day,
+#                  re-submitting itself for the next day at 06:00.
 #
-# Environment   : Linux / Bash 4+
-# Dependencies  : Oracle sqlplus, mailx, cron or at (for scheduling)
+# Environment    : Linux / Bash 4+
+# Dependencies   : Oracle sqlplus (on PATH, OS-authenticated),
+#                  mailx (with a functioning MTA — postfix/sendmail),
+#                  cron or at daemon (for next-day scheduling)
 #
 # Original Author : (VMS legacy — RSERC_CHK.COM)
-# Converted By    : VMS-to-Linux conversion
+# Converted By    : VMS-to-Linux migration
 #
-# VMS Sections Mapped:
-#   set proc/priv=all              -> run as appropriate user
-#   submit/after=tomorrow"+6"      -> schedule_next_run()
-#   start:                         -> check_tap_directories()
-#   Rserc_created_and_CDRs_processed: -> generate_hourly_reports()
-#   rserc_check:                   -> (inside generate_hourly_reports)
-#   start_1:                       -> check_rserc_failures()
-#   check_hour:                    -> main() loop control
-#   finish:                        -> cleanup_and_exit()
+# ------- OpenVMS-to-Linux Section Mapping -------
+#   VMS DCL Label / Command              ->  Linux Bash Function
+#   ────────────────────────────────────────────────────────────
+#   $ set proc/priv=all                  ->  (run as appropriate OS user)
+#   $ submit/after=tomorrow"+6"...       ->  schedule_next_run()
+#   $ sqlplus ... SPOOL spid_list.lis    ->  generate_spid_list()
+#   $ start:                             ->  check_tap_directories()
+#     notify_check: / to_price_check:
+#     priced_check: / loop:
+#   $ Rserc_created_and_CDRs_processed:  ->  generate_hourly_reports()
+#   $ rserc_check:                       ->  (inside generate_hourly_reports)
+#   $ start_1:                           ->  check_rserc_failures()
+#   $ check_hour: / wait / goto          ->  main() loop control
+#   $ finish:                            ->  cleanup_and_exit()
+#
+# ------- Usage -------
+#   Direct run (foreground):
+#       ./rserc_chk.sh
+#
+#   Background (production):
+#       nohup ./rserc_chk.sh >> /data/tap/.../LOG/rserc_chk.log 2>&1 &
+#
+#   Cron (recommended for daily scheduling):
+#       0 6 * * * /path/to/rserc_chk.sh >> .../LOG/rserc_chk.log 2>&1
+#
+#   Source for unit testing (does NOT execute main):
+#       source rserc_chk.sh
+#       # now call individual functions: log_msg "test", etc.
+#
+# ------- Environment Variable Overrides -------
+#   All TAP_* directory paths, MAX, SPLIT_MAX, WORK_DIR, LOG_FILE,
+#   RERUN_RSERC_SQL can be overridden via environment variables before
+#   running the script. See CONFIGURATION section below.
 ###############################################################################
 
 ###############################################################################
@@ -69,51 +95,129 @@ run_count=0
 #                       FUNCTIONS
 ###############################################################################
 
-# ---- Logging helper (VMS: wso "message") ----
+# Function: log_msg
+# Purpose: Writes a timestamped message to both stdout and the log file.
+#          Mirrors the VMS pattern: wso "''dttm' - <message>" where wso is
+#          WRITE SYS$OUTPUT and f$time() provides the timestamp.
+# Inputs:
+#   $1 — The message text to log
+# Outputs:
+#   Prints "DD-Mon-YYYY HH:MM:SS - <message>" to stdout
+#   Appends the same line to ${LOG_FILE}
+# Side Effects:
+#   - Appends to the log file (creates it if it does not exist)
+#   - Uses date(1) to generate the timestamp
+# Usage:
+#   log_msg "RSERC CHK started"
+#   log_msg "There are 450 files in tap collection"
 log_msg() {
     local msg="$1"
     local dttm
+    # Generate timestamp in DD-Mon-YYYY HH:MM:SS format
+    # VMS equivalent: dttm=f$time()
     dttm=$(date '+%d-%b-%Y %H:%M:%S')
+    # Write to stdout AND append to log file simultaneously
+    # VMS only wrote to SYS$OUTPUT; the batch queue redirected to the log.
     echo "${dttm} - ${msg}" | tee -a "${LOG_FILE}"
 }
 
-# ---- Send email alert with empty body (VMS: mail NL: "addr"/sub="subject") ----
+# Function: send_alert
+# Purpose: Sends an email alert with an empty body (subject-only notification)
+#          and logs the alert message. Mirrors VMS: mail NL: "addr"/sub="..."
+#          where NL: is the null device (empty body).
+# Inputs:
+#   $1 — The email subject line / alert message text
+# Outputs:
+#   Sends an email to EMAIL_L2 with empty body and the given subject
+#   Logs the subject text via log_msg()
+# Side Effects:
+#   - Invokes mailx(1) which requires a functioning MTA (postfix/sendmail)
+#   - Mail delivery failures are silently suppressed (2>/dev/null)
+# Usage:
+#   send_alert "No Call files processed by TAP collection in last four hours"
+#   send_alert "There are 450 files in tap collection"
 send_alert() {
     local subject="$1"
+    # Pipe empty string as body — VMS equivalent: mail NL: "addr"/sub="..."
     echo "" | mailx -s "${subject}" "${EMAIL_L2}" 2>/dev/null
     log_msg "${subject}"
 }
 
-# ---- Send email with file body (VMS: MAIL file "addr"/sub="subject") ----
+# Function: send_report
+# Purpose: Sends an email with a file as the email body to one or more
+#          recipients. Mirrors VMS: MAIL/SUBJ="..." file "recipient"
+# Inputs:
+#   $1       — Email subject line
+#   $2       — Path to the file whose contents become the email body
+#   $3...$N  — One or more recipient email addresses
+# Outputs:
+#   Sends one email per recipient, each containing the file contents as body
+# Side Effects:
+#   - Invokes mailx(1) once per recipient
+#   - Mail delivery failures are silently suppressed (2>/dev/null)
+#   - Reads the file via stdin redirection (< file)
+# Usage:
+#   send_report "TAP - Report" "/tmp/report.lis" "user1@example.com"
+#   send_report "TAP - Report" "/tmp/report.lis" "user1@ex.com" "user2@ex.com"
 send_report() {
     local subject="$1"
     local file="$2"
     shift 2
+    # Loop through all recipients — VMS required one MAIL command per recipient
     for recipient in "$@"; do
         mailx -s "${subject}" "${recipient}" < "${file}" 2>/dev/null
     done
 }
 
-###############################################################################
-#  Schedule next day's run (VMS: submit/after=tomorrow"+6"/keep/log=...)
-#  On Linux, prefer a crontab entry:
-#    0 6 * * * /path/to/rserc_chk.sh >> .../LOG/rserc_chk.log 2>&1
-###############################################################################
-
+# Function: schedule_next_run
+# Purpose: Schedules this script to execute again at 06:00 tomorrow.
+#          Mirrors VMS: submit/after=tomorrow"+6"/keep/log=tap_log_dir:rserc_chk.log/noprint
+#          The VMS SUBMIT command placed the job in the batch queue scheduler;
+#          on Linux we use the 'at' daemon or rely on cron.
+# Inputs:
+#   None (uses $0 to determine this script's own path)
+# Outputs:
+#   On success: a job is registered with the 'at' daemon for 06:00 tomorrow
+#   On failure: a WARNING message is logged suggesting cron configuration
+# Side Effects:
+#   - Invokes at(1); requires atd service to be running
+#   - Uses readlink(1) to resolve the script's absolute path
+#   - If 'at' is unavailable, no job is scheduled (cron must be configured)
+# Usage:
+#   schedule_next_run
+#   # Alternative (recommended): use crontab instead:
+#   # 0 6 * * * /path/to/rserc_chk.sh >> .../LOG/rserc_chk.log 2>&1
 schedule_next_run() {
+    # Resolve absolute path of this script and pipe to 'at' for next-day 06:00
     echo "$(readlink -f "$0")" | at 06:00 tomorrow 2>/dev/null || \
         log_msg "WARNING: Could not schedule next run via 'at'. Ensure cron is configured."
 }
 
-###############################################################################
-#  Generate SPID list from Oracle
-#  VMS: sqlplus -s / -> SPOOL spid_list.lis -> select SP_ID from service_providers
-###############################################################################
-
+# Function: generate_spid_list
+# Purpose: Queries Oracle for all Service Provider IDs (SP_ID) from the
+#          service_providers table and writes them to a file (one per line).
+#          This list is used later by check_tap_directories() to iterate
+#          through per-SPID split directories.
+#          Mirrors VMS: sqlplus -s / -> SPOOL spid_list.lis -> SELECT SP_ID...
+# Inputs:
+#   None (uses OS-authenticated Oracle connection via sqlplus /)
+# Outputs:
+#   Creates file ${WORK_DIR}/spid_list.lis containing one SP_ID per line
+#   Sets global variable SPID_LIST to the file path
+#   Logs "Creating SPID list" message
+# Side Effects:
+#   - Executes sqlplus(1) — requires ORACLE_HOME, ORACLE_SID, and
+#     OS-authenticated Oracle access
+#   - Writes to WORK_DIR
+# Usage:
+#   generate_spid_list
+#   cat "${SPID_LIST}"   # inspect the output
 generate_spid_list() {
     log_msg "Creating SPID list"
     SPID_LIST="${WORK_DIR}/spid_list.lis"
 
+    # Quoted heredoc (<<'EOSQL') prevents shell variable expansion inside SQL.
+    # SET commands suppress Oracle banners so only raw SP_ID values are output.
     sqlplus -s / <<'EOSQL' > "${SPID_LIST}"
 SET VERIFY OFF
 SET FEEDBACK OFF
@@ -124,12 +228,34 @@ EXIT
 EOSQL
 }
 
-###############################################################################
-#  Check TAP directories for file backlog
-#  VMS sections: start: -> notify_check: -> to_price_check: -> priced_check: ->
-#                loop: (per-SPID split check)
-###############################################################################
-
+# Function: check_tap_directories
+# Purpose: Monitors five categories of TAP pipeline directories for file
+#          backlogs and sends email alerts when thresholds are exceeded.
+#          Mirrors VMS sections: start: -> notify_check: -> to_price_check:
+#          -> priced_check: -> loop: (per-SPID split check)
+#
+#          The five checks are:
+#          1. Archive — cd*.dat files modified within last 4 hours (zero = alert)
+#          2. Collect — CD?????GBRCN*.dat file count > MAX (400) = alert
+#          3. To-Price — CD?????GBRCN*.DAT file count > MAX (400) = alert
+#          4. Priced  — CD?????GBRCN*.PRC file count > MAX (400) = alert
+#          5. Per-SPID Split — CD*.SPLIT file count > SPLIT_MAX (600) = alert
+#
+# Inputs:
+#   Environment: TAP_ARCHIVE_DIR, TAP_COLLECT_DIR, TAP_READY_FOR_PRICING,
+#                TAP_OB_PRICED, TAP_OB_SPLIT (directory paths)
+#   Globals:     MAX (threshold, default 400), SPLIT_MAX (default 600),
+#                SPID_LIST (file path from generate_spid_list),
+#                run_count (incremented each call)
+# Outputs:
+#   Sends email alerts via send_alert() when thresholds are exceeded
+#   Increments the global run_count by 1
+# Side Effects:
+#   - Invokes find(1) on each TAP directory
+#   - May send emails via send_alert() -> mailx
+#   - Reads SPID_LIST file line by line
+# Usage:
+#   check_tap_directories   # call once per hourly cycle
 check_tap_directories() {
     log_msg "Checking TAP directories"
     run_count=$((run_count + 1))
@@ -183,11 +309,34 @@ check_tap_directories() {
     fi
 }
 
-###############################################################################
-#  Generate RSERC and CDR hourly reports via Oracle, email them, check zero
-#  VMS sections: Rserc_created_and_CDRs_processed: -> rserc_check:
-###############################################################################
-
+# Function: generate_hourly_reports
+# Purpose: Queries Oracle for hourly RSERC file-creation and roaming CDR
+#          processing statistics, emails the reports to L2/Apollo, and
+#          checks whether zero RSERCs have been created in the last 4 hours.
+#          Mirrors VMS sections: Rserc_created_and_CDRs_processed: and
+#          rserc_check:
+#
+#          Three Oracle spool outputs are produced:
+#            files_created.lis  — Hourly RSERC file creation (grouped by hour)
+#            files_created1.lis — Count of RSERCs created in last 4 hours
+#            recs_created.lis   — Hourly roaming CDR stats (grouped by hour)
+#
+# Inputs:
+#   Globals: WORK_DIR, EMAIL_L2, EMAIL_APOLLO, run_count
+#   Oracle:  outgoing_outbound_call_files table, PROCESS_STATISTICS table
+# Outputs:
+#   Emails files_created.lis to EMAIL_L2
+#   Emails recs_created.lis to EMAIL_L2 and EMAIL_APOLLO
+#   Sends zero-RSERC alert if FILE_COUNT=0 and run_count > 1
+# Side Effects:
+#   - Executes a single sqlplus session producing three spool files
+#   - Sends up to 3 emails (2 reports + 1 optional alert)
+#   - Creates and then deletes temporary spool files in WORK_DIR
+#   - The heredoc uses UNQUOTED delimiter (<<EOSQL) so ${FILES_CREATED}
+#     etc. expand to correct file paths inside SPOOL directives
+# Usage:
+#   run_count=2
+#   generate_hourly_reports
 generate_hourly_reports() {
     log_msg "Creating Tap hourly reports"
 
@@ -276,11 +425,38 @@ EOSQL
     rm -f "${FILES_CREATED}" "${FILES_CREATED1}" "${RECS_CREATED}" 2>/dev/null
 }
 
-###############################################################################
-#  Check for RSERC failures and auto-recover
-#  VMS sections: start_1: -> .don check -> .tmp check -> recovery loop
-###############################################################################
-
+# Function: check_rserc_failures
+# Purpose: Detects failed RSERC assembly runs by inspecting the outgoing SP
+#          directory for orphaned .don and .tmp files. If .tmp files are found,
+#          the function performs automatic recovery: it identifies affected
+#          SP_IDs from mrlog*.tmp filenames, deletes the orphaned files, and
+#          re-triggers RSERC assembly via sqlplus @rerun_rserc.sql per SP_ID.
+#          Mirrors VMS section: start_1: -> .don check -> .tmp check -> loop.
+#
+#          Flow:
+#          1. Check if assembly/dist processes are running (ps -ef). If yes,
+#             skip checks — the process is still active.
+#          2. Check for .don files -> alert TAP Support + L2 (no auto-fix).
+#          3. Check for .tmp files -> alert + auto-recovery:
+#             a. List mrlog*.tmp filenames
+#             b. Delete all .tmp from TAP_OUTGOING_SP and TAP_PERIOD_DIR
+#             c. Extract SP_ID from position 35 of each mrlog filename
+#             d. Call sqlplus @rerun_rserc.sql for each unique SP_ID
+#
+# Inputs:
+#   Globals: TAP_OUTGOING_SP, TAP_PERIOD_DIR, WORK_DIR, RERUN_RSERC_SQL,
+#            EMAIL_TAP_SUPPORT, EMAIL_L2
+# Outputs:
+#   Sends alert emails if .don or .tmp files found
+#   Re-triggers RSERC assembly for each affected SP_ID
+# Side Effects:
+#   - Invokes ps(1) to check running processes
+#   - DELETES .tmp files from TAP_OUTGOING_SP and TAP_PERIOD_DIR
+#   - Invokes sqlplus @rerun_rserc.sql for recovery
+#   - Creates and deletes temp files in WORK_DIR
+#   - Note: "Procudure" in the .tmp alert is the original VMS typo, preserved
+# Usage:
+#   check_rserc_failures   # called every 10 minutes in the inner loop
 check_rserc_failures() {
     log_msg "Checking for RSERC failures"
 
@@ -356,13 +532,34 @@ check_rserc_failures() {
     rm -f "${RSERC_CHK_LIS}" 2>/dev/null
 }
 
-###############################################################################
-#  Main execution loop
-#  VMS: start: -> start_1: -> check_hour: loop structure
-#  Outer loop = hourly full cycle (dirs + reports)
-#  Inner loop = 10-minute RSERC failure checks until hour changes
-###############################################################################
-
+# Function: main
+# Purpose: Orchestrates the entire monitoring process with a two-level loop.
+#          Mirrors the VMS flow: start: -> start_1: -> check_hour: -> wait/goto.
+#
+#          Outer loop (runs each time the clock hour advances):
+#            1. check_tap_directories() — full directory backlog scan
+#            2. generate_hourly_reports() — Oracle reports + zero-RSERC check
+#            3. Record last_hour
+#
+#          Inner loop (runs every 10 minutes within an hour):
+#            1. check_rserc_failures() — failure detection + auto-recovery
+#            2. If hour == 23 → exit (triggers cleanup via EXIT trap)
+#            3. If hour advanced → break to outer loop
+#            4. Otherwise → sleep 600 seconds (10 min)
+#
+# Inputs:
+#   Command-line arguments (not currently used)
+#   All environment variables / globals (see CONFIGURATION section)
+# Outputs:
+#   Log entries, email alerts, email reports, RSERC re-runs
+# Side Effects:
+#   - Calls schedule_next_run() (at daemon or cron)
+#   - Calls generate_spid_list() (Oracle query)
+#   - Runs from startup until hour 23, then returns 0
+#   - EXIT trap invokes cleanup_and_exit()
+#   - Sleeps for 600 seconds between inner-loop iterations
+# Usage:
+#   main "$@"   # called from the entry-point guard at bottom of script
 main() {
     schedule_next_run
     log_msg "RSERC CHK started"
@@ -403,11 +600,26 @@ main() {
     done
 }
 
-###############################################################################
-#  Cleanup and exit (VMS: finish: section)
-###############################################################################
-
+# Function: cleanup_and_exit
+# Purpose: End-of-day cleanup — removes old log files (>30 days), temporary
+#          work files, and the WORK_DIR directory. Includes a double-call
+#          guard to prevent duplicate execution when triggered by both the
+#          normal exit path and a signal handler (trap).
+#          Mirrors VMS: finish: section (del/bef="-30-" ..., del rserc_failure*, etc.)
+# Inputs:
+#   Globals: _CLEANUP_DONE, TAP_LOG_DIR, WORK_DIR, LOG_FILE
+# Outputs:
+#   Logs "RSERC_CHK completed"
+#   Deletes log files older than 30 days
+#   Removes temporary files and WORK_DIR
+# Side Effects:
+#   - Invokes find(1) -delete on TAP_LOG_DIR for old logs
+#   - Removes WORK_DIR recursively (rm -rf)
+#   - Sets _CLEANUP_DONE=1 to prevent re-entry
+# Usage:
+#   cleanup_and_exit   # typically called via: trap cleanup_and_exit EXIT SIGTERM SIGINT
 cleanup_and_exit() {
+    # Double-call guard: prevent duplicate cleanup if triggered by trap + normal exit
     if [ "${_CLEANUP_DONE}" -eq 1 ]; then
         return 0
     fi
