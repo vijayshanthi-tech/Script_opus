@@ -1,0 +1,1030 @@
+$!=============================================================================
+$!
+$! Procedure Name       :       SFTP_TRANSFER.COM
+$!
+$! Description          :
+$!
+$!                              Generic SFTP script to push and pull files to/from other servers.
+$!
+$! Input Parameters     :       Two input parameters required(Config file, Action On Success)
+$!                              Param 1: Config file which contains the remote host, name, target directory,
+$!                                       file transfer mode (ascii, binary etc..)
+$!                              Param 2: Action On Success i.e. after SFTP what action to be required on the file
+$!                                       "NOCHANGE" or "GZ" or rename it to the extension (".COPIED", ".DONE"..etc)
+$! Creation Date        :       28 May 2015
+$!
+$! Created by           :       Vimalraj Ganesan
+$!
+$! Version 1.0          :       Initial version.
+$!
+$!	2.0	Amreet		Modified SFTP call logic to support process SSH commands
+$!==============================================================================
+$!
+$       phase           =       "SAVE_ENVIRONMENT"
+$! Define the ERROR Messages
+$SFTP_WrongParam        =="Generic_ftp_out.com called with wrong parameter no "
+$SFTP_BadJobInBatch     == "Retained job found on the queue - indicates previous platform crash:Previous SFTP incomplete." + -
+                                                  "Correction required"
+$E_SFTPAttempt       =="SFTP attempt failed"
+$F_SFTPFailed        =="All attempts failed. Correction required"
+$F_SFTPCfgVSrcDirExist   == "Source directory does not exist"
+$!
+$! Definition of symbols for the procedure.
+$!========================================================================================
+$!
+$       PROCNAME    =  f$parse("''f$environment(""PROCEDURE"")'",,,"NAME")
+$       LOGFILE     =  f$parse("''f$environment("PROCEDURE")'",,,"NAME")+".LOG"
+$!
+$       WSO             ==      "write sys$output"
+$       CSI[0,8]        =       %D155
+$       ESC[0,8]        =       %D27
+$       OPERATOR        ==      "OPER8"
+$       REV             =       "''CSI'7m"
+$       OFF             =       "''CSI'0m"
+$       message         =       ""
+$       status          ==      ""
+$       email_flag      =       "Y"
+$       nodename        =       f$getsyi("nodename")
+$!
+$       contcodes       =       f$environment("control")
+$       messcodes       =       f$environment("message")
+$       def_dir         =       f$environment("default")
+$!
+$       verify          =       f$verify(1)
+$       set control     =       (t,y)
+$!
+$       gzip            :==     $sys$system:gzip.exe
+$!       encode          :==     $sys$system:uuencode.exe
+$		encode			:==		$SYS$SYSTEM:TCPIP$UUENCODE.EXE
+$!
+$		CfgFileID = p1
+$		Sftp_Type = p2
+$		ActionOnSuccess = p6
+$	SftpType = f$edit("''Sftp_Type'","UPCASE")
+$!
+$	If SftpType .eqs. "PUSH" 
+$	then 
+$		SrcDir = p3
+$		DestFileName = p4
+$		DestFilePattern = p5
+$		PullDestDir=""
+$		PullFilePattern =""
+$		RetryAttempts = 3
+$		RetryWaitSeconds = 5
+$	ELSE
+$		SrcDir = ""
+$		DestFileName = ""
+$		DestFilePattern = ""
+$       PullDestDir = p3
+$		PullFilePattern = p4
+$		RetryAttempts = 3
+$		RetryWaitSeconds = 5
+$		p5 = ""
+$	ENDIF
+$       set message/text/severity/facility/id
+$!
+$
+$       @cell0_com:log_mess "   " "''procname' has started at ''f$time()'" " "
+$!
+$!========================================================================================
+$! Check for any error in previous execution.
+$!========================================================================================
+$!
+$ phase          =  "CHECK_PREV_ERROR"
+$!
+$       PIPE  SHOW ENTRY "''p1'" | SEARCH SYS$INPUT RETAINED
+$       if $severity .ne.  3
+$       then
+$               status = SFTP_BadJobInBatch
+$               goto REG_ERROR
+$       endif
+$!
+$!========================================================================================
+$! Check the logicals
+$!========================================================================================
+$!
+$       if (F$Trnlnm("SFTP_COM_DIR")) .eqs. ""
+$       then
+$                       status  ==      "GENERIC_SFTP : SFTP_COM_DIR logical not defined"
+$                       goto REG_ERROR
+$       endif
+$!
+$       if (F$Trnlnm("SFTP_CFG_DIR")) .eqs. ""
+$       then
+$                       status  ==      "GENERIC_SFTP Error : SFTP_CFG_DIR logical not defined"
+$                       goto REG_ERROR
+$       endif
+$!
+$               IF ( (f$search ("SFTP_CFG_DIR:''p1'",2) .eqs. ""))
+$               THEN
+$                       status  ==      "GENERIC_SFTP Error : SFTP_CFG_DIR: ''p1'.cfg not found"
+$                       goto REG_ERROR
+$               ENDIF
+$!
+$! Get the .cfg file name and assign to a process to avoid the dead lock
+$!
+$               current_process =  f$extract(4,15,CfgFileID)
+$ sh sym current_process
+$       gosub set_process_name
+$       IF .NOT. set_process_name_success
+$       THEN
+$               status = set_process_name_error
+$           goto REG_ERROR
+$       ENDIF
+$       on      warning then goto vms_error
+$!
+$!========================================================================================
+$! Check the input parameters
+$!========================================================================================
+$!
+$ phase         =  "GET_INPUT_PARAMS"
+$!
+$!
+$       IF CfgFileID .eqs. ""
+$       THEN
+$               status==SFTP_WrongParam+" 1 value= "+CfgFileID
+$               goto REG_ERROR
+$       ENDIF
+$!
+$       IF ActionOnSuccess .eqs. ""
+$       THEN
+$               ActionOnSuccess="NOCHANGE"
+$       ELSE
+$               if ActionOnSuccess .nes. "DELETE"  .and. ActionOnSuccess .nes. "GZ" .and. ActionOnSuccess .nes. "NOCHANGE" -
+                  .and. F$EXTRACT(0,1,ActionOnSuccess)  .nes. "."
+$               then
+$                       status==SFTP_WrongParam+" 5 value= "+ActionOnSuccess
+$                       goto REG_ERROR
+$               endif
+$       ENDIF
+$!========================================================================================
+$! Get all required parameters from the SFTP ConfigFile
+$!========================================================================================
+$!
+$  phase = "SFTP_PARAMETERS"
+$!
+$ get_sftp_params:
+$!        FCfgFileID=""
+$!        Sftp_type=""
+$!        SrcDir=""
+$!        DestHostname=""
+$!        DestUsername=""
+$!        DestDir=""
+$!        DestFileName=""
+$!        TransferType=""
+$!        PullSrcDir=""
+$!        PullDestDir=""
+$!        PullFilePattern=""
+$!        RetryAttempts=""
+$!        RetryWaitSeconds=""
+$!        Description=""
+$        status = "Error opening SFTP CFG FILE"
+$        SFTP_DONE = 0
+$!
+$! sh sym CfgFileID
+$        define /process tmp_file SFTP_CFG_DIR:'CfgFileID
+$! sh sym tmp_file
+$        open/read  param_file  tmp_file:  /error=REG_ERROR
+$        status=""
+$!
+$ read_next_param:
+$        status = "Error reading SFTP CFG FILE."
+$        read /error=REG_ERROR /end_of_file=eof_cfg param_file parameter_line
+$        status=""
+$!
+$        if f$locate("!",parameter_line)                .eq. 0
+$        then
+$           goto read_next_param
+$        endif
+$!        if f$locate("SftpType:",parameter_line)          .eq. 0
+$!        then
+$!           SftpType = f$edit(F$EXTRACT(F$LOCATE(":",parameter_line)+1,150,parameter_line),"COLLAPSE")
+$!               IF SftpType .eqs. "" .or. SftpType .eqs. ":" .or. SftpType .nes. "push" .and. SftpType .and. "pull" .or. SftpType .and. "both"
+$!               THEN
+$!               status="Mandatory field (SftpType) in the configuration files are blank/absent"
+$!               goto REG_ERROR
+$!               ENDIF
+$!           goto read_next_param
+$!        endif
+$!
+$        if f$locate("DestHostname:",parameter_line)            .eq. 0
+$        then
+$           DestHostname = f$edit(F$EXTRACT(F$LOCATE(":",parameter_line)+1,150,parameter_line),"COLLAPSE")
+$               IF DestHostname .eqs. ""  .or. DestHostname .eqs. ":"
+$               THEN
+$               status="Mandatory field (DestHostname) in the configuration files are blank/absent"
+$               goto REG_ERROR
+$               ENDIF
+$           goto read_next_param
+$        endif
+$!
+$        if f$locate("DestUsername:",parameter_line)            .eq. 0
+$        then
+$           DestUsername = f$edit(F$EXTRACT(F$LOCATE(":",parameter_line)+1,150,parameter_line),"COLLAPSE")
+$               IF DestUsername .eqs. ""  .or. DestUsername .eqs. ":"
+$               THEN
+$               status="Mandatory field (DestUsername) in the configuration files are blank/absent"
+$               goto REG_ERROR
+$               ENDIF
+$           goto read_next_param
+$        endif
+$!
+$        if f$locate("TransferType:",parameter_line)            .eq. 0
+$        then
+$           TransferType=f$edit(F$EXTRACT(F$LOCATE(":",parameter_line)+1,150,parameter_line),"COLLAPSE")
+$!           IF TransferType .eqs. ""  .or. TransferType .eqs. ":" .or. TransferType .nes. "A" .and. TransferType .nes. "B"
+$!           THEN
+$!               status="Mandatory field (TransferType) in the configuration files are blank/absent"
+$!               goto REG_ERROR
+$!           ENDIF
+$           goto read_next_param
+$        endif
+$!
+$		sh sym parameter_line
+$!               if f$locate("SrcDir:",parameter_line)          .eq. 0
+$!               then
+$!                   SrcDir = f$edit(F$EXTRACT(F$LOCATE(":",parameter_line)+1,150,parameter_line),"COLLAPSE")
+$!		    sh sym SrcDir
+$!                  	goto read_next_param
+$!               endif
+$!
+$               if f$locate("DestDir:",parameter_line)                 .eq. 0
+$               then
+$               	DestDir=f$edit(F$EXTRACT(F$LOCATE(":",parameter_line)+1,150,parameter_line),"COLLAPSE")
+$              		goto read_next_param
+$               endif
+$!
+$!               if f$locate("DestFileName:",parameter_line)            .eq. 0
+$!               then
+$!               	DestFileName=f$edit(F$EXTRACT(F$LOCATE(":",parameter_line)+1,150,parameter_line),"COLLAPSE")
+$! sh sym DestFileName
+$!              		goto read_next_param
+$!               endif
+$!
+$!               if f$locate("DestFilePattern:",parameter_line)            .eq. 0
+$!               then
+$!              		DestFilePattern=f$edit(F$EXTRACT(F$LOCATE(":",parameter_line)+1,150,parameter_line),"COLLAPSE")
+$! sh sym DestFilePattern
+$!               	goto read_next_param
+$!               endif
+$!
+$!	 sh sym parameter_line
+$        if f$locate("PullSrcDir:",parameter_line)            .eq. 0
+$        then
+$           PullSrcDir=f$edit(F$EXTRACT(F$LOCATE(":",parameter_line)+1,150,parameter_line),"COLLAPSE")
+$	    sh sym PullSrcDir
+$           goto read_next_param
+$        endif
+$!
+$!        if f$locate("PullDestDir:",parameter_line)            .eq. 0
+$!        then
+$!           PullDestDir=f$edit(F$EXTRACT(F$LOCATE(":",parameter_line)+1,150,parameter_line),"COLLAPSE")
+$! sh sym PullDestDir
+$!           goto read_next_param
+$!        endif
+$!
+$!        if f$locate("PullFilePattern:",parameter_line)            .eq. 0
+$!        then
+$!           PullFilePattern=f$edit(F$EXTRACT(F$LOCATE(":",parameter_line)+1,150,parameter_line),"COLLAPSE")
+$!           goto read_next_param
+$!        endif
+$!
+$!        if f$locate("RetryAttempts:",parameter_line)           .eq. 0
+$!        then
+$!           RetryAttempts=f$edit(F$EXTRACT(F$LOCATE(":",parameter_line)+1,150,parameter_line),"COLLAPSE")
+$!        endif
+$!
+$!        if f$locate("RetryWaitSeconds:",parameter_line)        .eq. 0
+$!        then
+$!           RetryWaitSeconds=f$edit(F$EXTRACT(F$LOCATE(":",parameter_line)+1,150,parameter_line),"COLLAPSE")
+$!           goto read_next_param
+$!        endif
+$!
+$!========================================================================================
+$! Raise the error messages if the input parameters missing
+$!========================================================================================
+$EOF_CFG:
+$       close param_file
+$!
+$!       IF RetryAttempts .eqs. ""   .or. RetryAttempts .eqs. ":"
+$!       THEN
+$!              RetryAttempts=3
+$!       ENDIF
+$!
+$!       IF RetryWaitSeconds .eqs. "" .or. RetryWaitSeconds .eqs. ":"
+$!       THEN
+$!               RetryWaitSeconds=60
+$!       ENDIF
+$!
+$!
+$!       IF SftpType .eqs. "push" .OR. SftpType .eqs. "both"
+$       IF SftpType .eqs. "push" .OR. SftpType .eqs. "PUSH"
+$       THEN
+$	    if SrcDir .eqs. ""   .or. SrcDir .eqs. ":"
+$           then
+$!           	status="Mandatory field (SrcDir) in the configuration files are blank/absent"
+$				status="Mandatory field (SrcDir) is not passed as parameter properly"
+$               goto REG_ERROR
+$            endif
+$!
+$	  		if DestDir .eqs. ""  .or. DestDir .eqs. ":"
+$	  		then
+$	  			status= "Mandatory field (DestDir) in the configuration files are blank/absent"
+$	  			goto REG_ERROR
+$	  		endif
+$!
+$     		if DestFileName .eqs. ""  .or. DestFileName .eqs. ":"
+$     		then
+$!				status="Mandatory field (DestFileName) in the configuration files are blank/absent"
+$				status="Mandatory field (DestFileName) is not passed as parameter properly"
+$     			goto REG_ERROR
+$     		endif
+$       ChildDir=f$element(1,"+",SrcDir)
+$!sh sym ChildDir
+$       if ChildDir .nes. "+"
+$       then
+$               SrcDir=f$parse(f$element(0,"+",SrcDir)) - "].;" +"."+ChildDir+"]"
+$!	sh sym SrcDir
+$       endif
+$ set def 'SrcDir
+$       DFile=f$parse(DestFileName,,,"NAME")
+$       type = f$parse(DestFileName,,,"TYPE")
+$	filetest=f$search("''DFile'''type';*",1)
+$	sh sym filetest
+$	len=f$length(filetest) 
+$!	sh sym len
+$	if f$length(filetest) .eq. 0  
+$       then
+$               status="Source File does not exist to transfer for Remote Server"
+$		goto CLEAN_FINISH
+$       goto REG_ERROR
+$       endif
+$	ENDIF
+$!
+$!       IF SftpType .eqs. "pull" .OR. SftpType .eqs. "both"
+$       IF SftpType .eqs. "pull" .OR. SftpType .eqs. "PULL"
+$       THEN
+$			if PullFilePattern .eqs. ""  .or. PullFilePattern .eqs. ":"
+$           then
+$!                   status="Mandatory field (PullFilePattern) in the configuration files are blank/absent"
+$           		status="Mandatory field (PullFilePattern) is not passed as parameter properly"
+$                   goto REG_ERROR
+$           endif
+$!
+$           if PullSrcDir .eqs. ""  .or. PullSrcDir .eqs. ":"
+$           then
+$                   status="Mandatory field (PullSrcDir) in the configuration files are blank/absent"
+$                   goto REG_ERROR
+$           endif
+$!
+$           if PullDestDir .eqs. ""  .or. PullDestDir .eqs. ":"
+$           then
+$!                   status="Mandatory field (PullDestDir) in the configuration files are blank/absent"
+$           		status="Mandatory field (PullDestDir) is not passed as parameter properly"
+$                   goto REG_ERROR
+$           endif
+$       ENDIF
+$!
+$       RetryAttempts   =F$integer(RetryAttempts)
+$       RetryWaitSeconds=F$integer(RetryWaitSeconds)
+$!       if RetryAttempts  .le. 0
+$!       then
+$!               status="Mandatory field (RetryAttempts) in the configuration files are blank/absent"
+$!               goto REG_ERROR
+$!       endif
+$!
+$!       if RetryWaitSeconds  .le. 0
+$!       then
+$!               status="Mandatory field (RetryWaitSeconds) in the configuration files are blank/absent"
+$!               goto REG_ERROR
+$!       endif
+$!
+$!========================================================================================
+$! Checks other than those done on command line and configuration file parameters
+$!========================================================================================
+$!
+$ more_checks:
+$!	sh sym SrcDir
+$       ChildDir=f$element(1,"+",SrcDir)
+$!sh sym ChildDir
+$       if ChildDir .nes. "+"
+$       then
+$               SrcDir=f$parse(f$element(0,"+",SrcDir)) - "].;" +"."+ChildDir+"]"
+$	sh sym SrcDir
+$       endif
+$!
+$       if   f$locate(":",DestFileName) .ne.  f$length(DestFileName)  -
+        .or. f$locate("]",DestFileName) .ne.  f$length(DestFileName)
+$       then
+$               if SrcDir .nes. "DEFAULT"
+$               then
+$                       if    f$parse(DestFileName,,,"NODE")+f$parse(DestFileName,,,"DEVICE")+f$parse(DestFileName,,,"DIRECTORY") -
+                        .nes. f$parse(SrcDir,,,"NODE")    +f$parse(SrcDir,,,"DEVICE")+f$parse(SrcDir,,,"DIRECTORY")
+$                       then
+$                               status="Source path conflict (Px:"+DestFileName+"; DB:"+SrcDir+")"
+$                               goto REG_ERROR
+$                       endif
+$               else
+$                       SrcDir=f$parse(SrcDir)-".;"
+$               endif
+$       else    !      DestFileName does not have directory
+$               if SrcDir .eqs. "DEFAULT"
+$               then
+$                       status="In config File Source path name is default, p2 also not having directory."
+$                       goto REG_ERROR
+$               else
+$                       DestFileName=f$parse(SrcDir)-".;"+DestFileName
+$! sh sym DestFileName
+$               endif
+$       endif
+$!
+$       ChildDir=f$element(1,"+",PullDestDir)
+$       if ChildDir .nes. "+"
+$       then
+$               PullDestDir=f$parse(f$element(0,"+",PullDestDir)) - "].;" +"."+ChildDir+"]"
+$       endif
+$! 	show symbol PullDestDir
+$!       show symbol SrcDir     !debug
+$!       show symbol DestFileName !debug
+$       if f$parse(SrcDir,,,"DIRECTORY") .eqs. ""
+$       then
+$               status=F_SFTPCfgVSrcDirExist
+$               goto REG_ERROR
+$       endif
+$!
+$!========================================================================================
+$! Prepare the input file to SFTP command for batch mode
+$!========================================================================================
+$!
+$ phase = "PREPARE_SFTP"
+$!
+$       CfgFileID = f$edit(CfgFileID,"TRIM")
+$       SftpType = f$edit(SftpType,"TRIM")
+$       SrcDir = f$edit(SrcDir,"TRIM")
+$       DestHostname = f$edit(DestHostname,"TRIM")
+$       DestUsername = f$edit(DestUsername,"TRIM")
+$       DestDir = f$edit(DestDir,"TRIM")
+$       DestFileName = f$edit(DestFileName,"TRIM")
+$       DestFilePattern = f$edit(DestFilePattern,"TRIM")
+$       TransferType = f$edit(TransferType,"TRIM")
+$       RetryAttempts = f$edit(RetryAttempts,"TRIM")
+$       RetryWaitSeconds = f$edit(RetryWaitSeconds,"TRIM")
+$       PullSrcDir = f$edit(PullSrcDir,"TRIM")
+$       PullDestDir = f$edit(PullDestDir,"TRIM")
+$       PullFilePattern = f$edit(PullFilePattern,"TRIM")
+$!
+$       DFile=f$parse(DestFileName,,,"NAME")
+$       type = f$parse(DestFileName,,,"TYPE")
+$!      vers  = f$parse(DestFileName,,,"VERSION")
+$!       sh sym DFile
+$!      sh sym type
+$!   sftp_string  = f$edit(DestUsername,"TRIM")+"@"+f$edit(DestHostname,"TRIM")
+$	sftp_string = """"+f$edit(DestUsername,"TRIM")+"@"+f$edit(DestHostname,"TRIM")+""""
+$	sh sym sftp_string
+$!
+$!
+$!========================================================================================
+$! Loop through in the directory and get each file and do the SFTP
+$!========================================================================================
+$!
+$ PUSH_SFTP:
+$! IF SftpType .eqs. "push" .OR. SftpType .eqs. "both"
+$ IF SftpType .eqs. "push" .OR. SftpType .eqs. "PUSH"
+$ THEN
+$ nextfile = f$search("RESET_SEARCH_CONTEXT_BOGUS.TMP;0",1)
+$ set def 'SrcDir
+$ FILE_SEARCH_LOOP:
+$ nextfile = f$search("''DFile'''type';*",1)
+$ sh sym nextfile
+$ if f$length(nextfile) .eq. 0 then goto SEARCH_DONE
+$ if f$file_attributes(nextfile,"DIRECTORY") then goto FILE_SEARCH_LOOP
+$ nextfile_edit = nextfile - f$parse(nextfile,,,"VERSION")
+$ filename = f$parse(nextfile_edit,,,"NAME") + f$parse(nextfile_edit,,,"TYPE")
+$!
+$  CREATE_BATCH_A: 
+$     sftp_tmp_file = f$extract(26,32,f$unique())+".SFTP"
+$     b_file_check=f$search("SFTP_CFG_DIR:''sftp_tmp_file'")    
+$     if f$length(b_file_check) .ne. 0                          
+$     then                                                      
+$      goto CREATE_BATCH_A                                      
+$     endif                                                     
+$     sftp_tmp_file_push = sftp_tmp_file
+$     create/fdl=sys$input sftp_cfg_dir:'sftp_tmp_file'
+        FILE
+            ORGANIZATION                sequential
+        RECORD
+            CARRIAGE_CONTROL    carriage_return
+            FORMAT              Stream_Lf
+            SIZE                120
+$!
+$       open/append sftp_file sftp_cfg_dir:'sftp_tmp_file'
+$!
+$       DestFile=f$parse(filename,,,"NAME")
+$       type = f$parse(filename,,,"TYPE")
+$       vers  = f$parse(filename,,,"VERSION")
+$! sh sym DestFile
+$! sh sym type
+$! sh sym vers
+$  sh sym DestFilePattern
+$ IF DestFilePattern .NES. ""
+$ THEN
+$       pattern_match=F$LOCATE(DestFilePattern,DestFile)
+$	filetype=f$extract(f$locate(".",DestFilePattern),1000,DestFilePattern)
+$sh sym filetype 
+$       if pattern_match .nes. "" 
+$       then
+$               DestFile_len = F$LENGTH(DestFile)
+$		If filetype .nes. ""
+$		Then
+$		      DFilePattern=f$extract(0,F$locate("*",DestFilePattern),DestFilePattern) 
+$		      DestFilePattern_len=F$LENGTH(DFilePattern)	
+$		Else
+$               	DestFilePattern_len = F$LENGTH(DestFilePattern)
+$		EndIf
+$               append_pattern = f$extract(DestFilePattern_len,DestFile_len,DestFile)
+$               sh sym append_pattern
+$       endif
+$ ENDIF
+$!
+$!	 
+$       set def 'SrcDir
+$       sh def
+$       copy/lo 'DestFile''type' cell0_dat:
+$!
+$       NewSrcDir = "/CELL0_DAT"
+$       if TransferType .eqs. "A"
+$       then
+$               write sftp_file "ascii"
+$       else
+$               write sftp_file "binary"
+$       endif
+$!
+$       if DestDir .nes. "DEFAULT"
+$       then
+$               write sftp_file "cd " + """" + "''DestDir'" + """"
+$       endif
+$!
+$!              write sftp_file "lcd " + """" + "''SrcDir'" + """"
+$!               write sftp_file "lcd " + """" + "''NewSrcDir'" + """"
+$               write sftp_file "put ''DestFile'''type'"
+$               IF DestFilePattern .nes. "" 
+$		THEN
+$			 if filetype .nes. ""
+$       	        then
+$               	        write sftp_file "rename ''DestFile'''type' ''DFilePattern'''append_pattern'''filetype'"
+$			else
+$   		            	write sftp_file "rename ''DestFile'''type' ''DestFilePattern'''append_pattern'''type'"
+$			endif
+$		ENDIF
+$
+$       write sftp_file "exit"
+$       close sftp_file
+$!
+$ set def cell0_Dat
+$ gosub RUN_SFTP_TRANSFER
+$ gosub ACTION_ON_SUCCESS
+$!
+$ delete/lo CELL0_DAT:'DestFile''type';*
+$!
+$ goto FILE_SEARCH_LOOP
+$SEARCH_DONE:
+$SFTP_DONE=1
+$ENDIF
+$!
+$!========================================================================================
+$! Get the files from remote host if the option is enabled in the configuration file
+$!========================================================================================
+$!
+$ PULL_SFTP:
+$! nextfile=f$search("RESET_SEARCH_CONTEXT_BOGUS.TMP;0",1)
+$! set def 'PullSrcDir
+$ sh def
+$! IF SftpType .eqs. "pull" .OR. SftpType .eqs. "both"
+$ IF SftpType .eqs. "pull" .OR. SftpType .eqs. "PULL"
+$ THEN  
+$!
+$! Make sure the same file type which is copied already should not be present in the CELL0_DAT directory. If present, the delete it before copy.
+$!
+$       set def CELL0_DAT
+$	previous_file=f$search("''PullFilePattern';*",1)
+$	if f$length(previous_file) .ne. 0
+$	then
+$		delete/lo CELL0_DAT:'PullFilePattern';*
+$	endif
+$!
+$  CREATE_BATCH_B:
+$	sftp_tmp_file = f$extract(26,32,f$unique())+".SFTP"                                                                       
+$       b_file_check=f$search("SFTP_CFG_DIR:''sftp_tmp_file'")   
+$       if f$length(b_file_check) .ne. 0                         
+$       then                                                     
+$        goto CREATE_BATCH_B                                     
+$       endif                                                    
+$       sftp_tmp_file_pull = sftp_tmp_file
+$ 	create/fdl=sys$input sftp_cfg_dir:'sftp_tmp_file'
+        FILE
+            ORGANIZATION                sequential
+        RECORD
+            CARRIAGE_CONTROL    carriage_return
+            FORMAT              Stream_Lf
+            SIZE                120
+$!
+$       open/append sftp_file sftp_cfg_dir:'sftp_tmp_file'
+$!	ENDIF
+$	sh def
+$!	NewSrcDir = "CELL0_DAT"
+$	NewSrcDir = "/CELL0_DAT"
+$       if TransferType .eqs. "A"
+$       then
+$               write sftp_file "ascii"
+$       else
+$               write sftp_file "binary"
+$       endif
+$       if PullSrcDir .nes. "DEFAULT"
+$       then
+$               write sftp_file "cd " + """" + "''PullSrcDir'" + """"
+$       endif
+$!
+$!	    write sftp_file "lcd " + """" + "''NewSrcDir'" + """"
+$       write sftp_file "get ''PullFilePattern'"
+$       write sftp_file "exit"
+$       close sftp_file
+$!
+$	gosub RUN_SFTP_TRANSFER
+$!
+$! Search the file count which is received from remote server. If count is 0 then raise the error.
+$!
+$ sh def
+$ set def CELL0_DAT
+$	pullfile_count=0
+$!       FILE_SEARCH_LOOP:
+$       nextfile = f$search("''PullFilePattern';*",1)
+$       if f$length(nextfile) .eq. 0 
+$	then 
+$		@cell0_com:log_mess "   " "The files for pull is not present in the remote server" " "
+$	else
+$		copy/lo CELL0_DAT:'PullFilePattern' 'PullDestDir'
+$	endif
+$!
+$!	copy/lo CELL0_DAT:'PullFilePattern';* 'PullDestDir' 
+$!  	purge/lo CELL0_DAT:'PullFilePattern'
+$!       delete/log/noconfirm CELL0_DAT:'PullFilePattern';*
+$ ENDIF
+$!
+$       IF ActionOnSuccess .eqs. "DELETE" .AND. SftpType .eqs. "pull" .OR. SftpType .eqs. "PULL" .OR. SftpType .eqs. "both"
+$       THEN
+$       nextfile = f$search("RESET_SEARCH_CONTEXT_BOGUS.TMP;0",1)
+$       FILE_SEARCH_LOOP:
+$       nextfile = f$search("''PullFilePattern';*",1) 
+$ 		if f$length(nextfile) .eq. 0 then goto SEARCH_DONE
+$ 		if f$file_attributes(nextfile,"DIRECTORY") then goto FILE_SEARCH_LOOP
+$		nextfile_edit = nextfile - f$parse(nextfile,,,"VERSION")
+$! 		filename = f$parse(nextfile_edit,,,"NAME") + f$parse(nextfile_edit,,,"TYPE")
+$               filename = f$parse(nextfile_edit,,,"NAME") + f$extract(f$locate(".",PullFilePattern),f$length(PullFilePattern),PullFilePattern)
+$               DestFile=f$parse(filename,,,"NAME")
+$!	type = f$parse(filename,,,"TYPE")
+$!	type = F$EDIT(type, "TRIM, LOWERCASE")                        --
+$!      type = f$extract(f$locate(".",filename),f$length(filename),filename)
+$ sh sym nextfile_edit     
+$       type = f$extract(f$locate(".",PullFilePattern),f$length(PullFilePattern),PullFilePattern)
+$  sh sym PullFilePattern
+$  DelFile=f$extract(0,F$locate("*",PullFilePattern),PullFilePattern)
+$ IF PullFilePattern .NES. ""
+$ THEN
+$       pattern_match=F$LOCATE(PullFilePattern,DestFile)
+$       if pattern_match .nes. ""
+$       then
+$               DestFile_len = F$LENGTH(DestFile)
+$               DelFile_len = F$LENGTH(DelFile)
+$               append_pattern = f$extract(DelFile_len,DestFile_len,DestFile)
+$               sh sym append_pattern
+$       endif
+$ ENDIF
+$  CREATE_BATCH_C:
+$     sftp_tmp_file = f$extract(26,32,f$unique())+".SFTP"
+$     b_file_check=f$search("SFTP_CFG_DIR:''sftp_tmp_file'")   
+$     if f$length(b_file_check) .ne. 0                         
+$     then                                                     
+$      goto CREATE_BATCH_C                                     
+$     endif                                                    
+$     sftp_tmp_file_pull_d = sftp_tmp_file
+$     create/fdl=sys$input sftp_cfg_dir:'sftp_tmp_file'
+        FILE
+            ORGANIZATION                sequential
+        RECORD
+            CARRIAGE_CONTROL    carriage_return
+            FORMAT              Stream_Lf
+            SIZE                120
+$       open/append sftp_file sftp_cfg_dir:'sftp_tmp_file'
+$       if PullDestDir .nes. "DEFAULT"
+$       then
+$               write sftp_file "cd " + """" + "''PullSrcDir'" + """"
+$       endif
+$!	write sftp_file "rm ''DelFile'''append_pattern'''type'" 
+$       write sftp_file "rm ''PullFilePattern'"
+$	write sftp_file "exit"
+$       close sftp_file
+$!
+$       gosub RUN_SFTP_TRANSFER
+$ 	goto FILE_SEARCH_LOOP
+$       SEARCH_DONE:
+$	ENDIF
+$!
+$! Delete the files from Cell0_dat which we copied already
+$	set def CELL0_DAT
+$!       nextfile = f$search("''PullFilePattern';*",1)
+$!	if f$length(nextfile) .ne. 0
+$!	then
+$!		delete/log/noconfirm CELL0_DAT:'PullFilePattern';*
+$!	endif
+$!
+$       if f$length(nextfile) .ne. 0
+$       then
+$               if f$edit("''PullDestDir'","UPCASE") .eqs. "CELL0_DAT" 
+$               then
+$                       goto CLEAN_FINISH
+$               else
+$                       delete/log/noconfirm CELL0_DAT:'PullFilePattern';*
+$               endif
+$       endif
+$!
+$ goto CLEAN_FINISH
+$!========================================================================================
+$!Run the SFTP
+$!========================================================================================
+$!
+$ phase = "RUN_SFTP_TRANSFER"
+$!
+$! sh def
+$ RUN_SFTP_TRANSFER:
+$!	
+$!       DEFINE /NOLOG SYS$OUTPUT NL:
+$       sftp_count = 0
+$ SFTP_LOOP:
+$!
+$       ON ERROR   THEN GOTO  RE_TRY
+$!       ON WARNING THEN GOTO  RE_TRY
+$!       set def sftp_cfg_dir
+$	sh def
+$!       sftp "-B" 'sftp_tmp_file 'sftp_string
+$	sftp/batchfile= SFTP_CFG_DIR:'sftp_tmp_file 'sftp_string
+$       ON ERROR THEN GOTO reg_error
+$       ON WARNING THEN CONTINUE
+$       GOTO END_SFTP
+$RE_TRY:
+$               ON ERROR THEN GOTO VMS_ERROR
+$               ON WARNING THEN CONTINUE
+$               sftp_count = sftp_count + 1
+$               if sftp_count .ge. RetryAttempts
+$               then
+$!                       DEASS SYS$OUTPUT
+$                       status = F_SFTPFailed
+$                       if      f$search(DestFileName) .nes. ""
+$                       then
+$                               goto REG_ERROR
+$                       else
+$                               goto VMS_ERROR
+$                       endif
+$               else
+$!                       gosub Housekeep1
+$                       @cell0_com:log_mess " ***"  "''procname' - ''phase',(''p1' file is ''DestFileName') ''E_SFTPAttempt'"  " "
+$!                      request/to='operator' "SFTP-E ''procname' - ''phase', (''p1' file is ''DestFileName') ''E_SFTPAttempt' "
+$                       call time_seconds 'RetryWaitSeconds
+$                       goto sftp_loop
+$               endif
+$END_SFTP:
+$! DEASS SYS$OUTPUT
+$ gosub Housekeep1
+$ RETURN
+$!
+$!
+$!
+$!========================================================================================
+$!      Once the file is copied, take the appropriate action
+$!========================================================================================
+$ACTION_ON_SUCCESS:
+$!
+$ IF SFTP_DONE .eq. 1
+$ THEN
+$       DestFileName=Pfilename
+$       set def 'PullDestDir
+$!      sh sym Pfilename
+$ ELSE
+$       DestFileName=filename
+$       set def 'SrcDir
+$!      sh sym DestFileName
+$ ENDIF
+$!
+$       if ActionOnSuccess .eqs. "DELETE"
+$       then
+$               delete /log 'DestFileName';*
+$       else if ActionOnSuccess .eqs. "GZ"
+$               then
+$!                      Gzip command will create compressed file with version no 1 only,
+$!                      to overcome this limitation the following logic has been applied.
+$                       set on
+$                       status="Error Compressing Source File ''DestFileName'"
+$                       just_name=f$element(0, ";", "''DestFileName'")
+$                       if f$search("''just_name'-gz",5) .nes. ""
+$                       then
+$                               rename  'just_name'-gz;* 'just_name'-gz-wip
+$                       endif
+$                       gzip   :== $sys$system:gzip.exe
+$                       gzip   'DestFileName'
+$                       rename 'just_name'-gz       'just_name'-gz-wip
+$                       rename 'just_name'-gz-wip;* 'just_name'-gz
+$                       status=""
+$               else if F$EXTRACT(0,1,ActionOnSuccess)  .eqs. "."
+$               then
+$                               set on
+$                               status="Error renaming Source File ''DestFileName'"
+$                               rename /log 'DestFileName'   *'ActionOnSuccess'
+$                               status=""
+$               endif
+$               endif
+$   endif
+$       RETURN
+$!
+$!========================================================================================
+$! This routine deletes the temporary sftp files
+$ Housekeep1:
+$!               sh  sym sftp_tmp_file
+$               if  f$search("sftp_cfg_dir:''sftp_tmp_file_pull'") .nes. ""
+$               then
+$                       delete/log/noconfirm sftp_cfg_dir:'sftp_tmp_file_pull';*
+$               endif
+$               if  f$search("sftp_cfg_dir:''sftp_tmp_file_push'") .nes. ""
+$               then
+$                       delete/log/noconfirm sftp_cfg_dir:'sftp_tmp_file_push';*
+$               endif
+$               if  f$search("sftp_cfg_dir:''sftp_tmp_file_pull_d'") .nes. ""
+$               then
+$                       delete/log/noconfirm sftp_cfg_dir:'sftp_tmp_file_pull_d';*
+$               endif
+$ Return
+$!========================================================================================
+$ This routine deletes the temporary files if any created by this DCL and are still
+$ available.
+$ Usage : call HOUSE_KEEP   <temp file no to house keep>/<0 for all>
+$!========================================================================================
+$!
+$ HOUSE_KEEP:
+$subroutine
+$       if p1 .eqs. "1" .or. p1 .eqs. "0"
+$       then
+$!                       delete/log/noconfirm SFTP_CFG_DIR:*.sftp;*
+$               if  f$search("sftp_cfg_dir:*.sftp") .nes. ""
+$               then
+$                       delete/log/before="TODAY-2-00:00:00" sftp_cfg_dir:*.sftp;*
+$               endif
+$                       sftp_purge_days  = F$Trnlnm("SFTP_PURGE_DAYS")
+$                       If sftp_purge_days .eqs. ""
+$                       Then
+$                               sftp_purge_days = 10
+$                       EndIf
+$               if  f$search("cell0_log:GENERIC_SFTP*.*;*") .nes. ""
+$               then
+$                     delete/log/before="TODAY-''sftp_purge_days'-00:00:00" cell0_log:GENERIC_SFTP*.*;*
+$               endif
+$       endif
+$endsubroutine
+$!
+$!========================================================================================
+$ Usage: time_seconds  <No of Seconds>
+$ Parameter:<No of Seconds>  Positive Integer
+$ Functionality: Waits for the period ( <No of Seconds> )
+$!========================================================================================
+$!
+$time_seconds:
+$subroutine
+$       set noverify
+$       ss    =p1
+$       ss_org=ss
+$       ss    =ss - ((ss/60) *60)
+$       mi    =(ss_org-ss)/60
+$       mi_org=mi
+$       mi    =mi - ((mi/60) *60)
+$       hr    =(mi_org-mi)/60
+$       set   verify
+$       wait 'hr':'mi':'ss'
+$endsubroutine
+$!========================================================================================
+$!       Clean Finish
+$!========================================================================================
+$!
+$ CLEAN_FINISH:
+$!--------------
+$!
+$
+$       phase   =       "CLEAN_FINISH"
+$       call    HOUSE_KEEP 0
+$!
+$       @cell0_com:log_mess "   " "''procname' has completed successfully at ''f$time()'" " "
+$!
+$       goto    exit
+$!
+$!========================================================================================
+$!       Error Handler
+$!========================================================================================
+$!
+$ VMS_ERROR:
+$!----------
+$!
+$       phase   =       "VMS_ERROR"
+$       call    HOUSE_KEEP 0
+$       if      status .eqs. ""
+$       then
+$               status          ==      $status
+$               error_text      =       f$message('status')
+$       else
+$               error_text      =       status
+$       endif
+$!
+$       @cell0_com:log_mess " ***" "''procname' - ''phase',(''p1' file is ''p6') ''error_text' " " "
+$       request/reply/to='operator' "SFTP-E ''procname' - ''phase',(''p1' file is ''p6') ''error_text' "
+$!
+$       if DestFileName .nes. ""
+$       then
+$               if f$search(DestFileName) .eqs. ""
+$               then
+$                       exit 4
+$               endif
+$       endif
+$!       goto any_prv_error
+$!
+$!========================================================================================
+$!******  Register Error and Continue with reading Config File ****
+$!========================================================================================
+$ REG_ERROR:
+$!----------
+$       phase   =       "REG_ERROR"
+$!
+$       call    HOUSE_KEEP 0
+$       @cell0_com:log_mess " ***" "''procname' - ''phase',(''p1' file is ''p6') ''status' " " "
+$       request/reply/to='operator' "SFTP-E ''procname' - ''phase',(''p1' file is ''p6') ''status' "
+$!
+$       if DestFileName .nes. ""
+$       then
+$               if f$search(DestFileName) .eqs. ""
+$               then
+$                       exit 4
+$               endif
+$       endif
+$!       goto  any_prv_error
+$!========================================================================================
+$! Restore DCL Environment.
+$!========================================================================================
+$!
+$ EXIT:
+$!------
+$!
+$       phase = "EXIT"
+$!
+$       set message 'messcodes'
+$!
+$       set default 'def_dir'
+$!
+$       if      contcodes .nes ""  then set control  =  ('contcodes')
+$!
+$       exit
+$!
+$!========================================================================================
+$! Set the process name
+$!========================================================================================
+$SET_PROCESS_NAME:
+$!
+$! Set the process name to that of symbol current_process, if everything is OK.
+$!
+$ set_process_name_success := FALSE
+$ set_process_name_error := Error trying to set process name
+$ ON WARNING THEN RETURN
+$ lc_conn_ctx = ""
+$ nl = F$CONTEXT("PROCESS", lc_conn_ctx, "PRCNAM", current_process, "EQL")
+$ nl = F$CONTEXT("PROCESS", lc_conn_ctx, "NODENAME", "''nodename'", "EQL")
+$PROCESS_LOOP:
+$ pid = F$PID(lc_conn_ctx)
+$ IF pid .NES. ""
+$ THEN
+$       cluster_node = F$GETJPI(pid, "NODENAME")
+$       IF cluster_node .NES. nodename
+$       THEN
+$               set_process_name_success := FALSE
+$               set_process_name_error = "''current_process' is already running on node ''cluster_node'"
+$               RETURN
+$       ELSE
+$               state = F$GETJPI(pid, "STATE")
+$               set_process_name_success := FALSE
+$               IF state .EQS. "SUSP"
+$               THEN
+$                       set_process_name_error = "''current_process' is already running, but is SUSPENDED - Please alert ASG"
+$                       REQUEST/REPLY/TO='operator' "GEN_SFTP-E ''set_process_name_error'"
+$                       RETURN
+$               ELSE
+$                       set_process_name_error = "''current_process' is already running"
+$                       REQUEST/TO='operator' "GEN_SFTP-E ''set_process_name_error'"
+$                       RETURN
+$               ENDIF
+$       ENDIF
+$ ENDIF
+$ SET PROCESS/NAME='current_process'
+$ set_process_name_success := TRUE
+$ RETURN
