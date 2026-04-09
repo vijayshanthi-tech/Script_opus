@@ -45,10 +45,6 @@ DEFAULT_CHECK_PERIOD=900   # 15 minutes in seconds (VMS: "00:15:00")
 
 # --- Directory mappings (VMS logicals → Linux paths) ---
 TAP_IB_RECEIVE_FROM_SDM="/data/call_data/tap/ib/receive_from_sdm"
-TAP_OB_RECEIVE_FROM_DCH="/data/call_data/tap/ob/receive_from_dch"
-TAP_WRK_DIR="/data/call_data/tap/wrk"
-TAP_LOG_DIR="/data/call_data/tap/log"
-TAP_COM_DIR="/data/call_data/tap/com"
 
 # --- PID file for singleton enforcement ---
 PID_FILE="/tmp/${PROC_NAME}.pid"
@@ -175,9 +171,9 @@ check_obcc() {
 
     local count=0
     # Count cd*.dat files
-    count=$((count + $(find "${TAP_OB_RECEIVE_FROM_DCH}" -maxdepth 1 -iname 'cd*.dat' 2>/dev/null | wc -l)))
+    count=$((count + $(find "${TAP_COLLECT_DIR}" -maxdepth 1 -iname 'cd*.dat' 2>/dev/null | wc -l)))
     # Count td*.dat files
-    count=$((count + $(find "${TAP_OB_RECEIVE_FROM_DCH}" -maxdepth 1 -iname 'td*.dat' 2>/dev/null | wc -l)))
+    count=$((count + $(find "${TAP_COLLECT_DIR}" -maxdepth 1 -iname 'td*.dat' 2>/dev/null | wc -l)))
 
     if [ "${count}" -gt "${limit}" ]; then
         return 7
@@ -302,15 +298,15 @@ check_gaps() {
 
     # Submit the GAPS job
     log_msg "Submitting TAP_GAPS_01 to queue ${GAPQ}"
-    if [ -x "${TAP_COM_DIR}/tap_job_startup.sh" ]; then
-        nohup "${TAP_COM_DIR}/tap_job_startup.sh" "GAPS" "01" "${GAPN}" \
+    if [ -x "${TAP_SH_DIR}/tap_job_startup.sh" ]; then
+        nohup "${TAP_SH_DIR}/tap_job_startup.sh" "GAPS" "01" "${GAPN}" \
             >> "${TAP_LOG_DIR}/tap_gaps_01.log" 2>&1 &
         if [ $? -ne 0 ]; then
             return 7
         fi
         log_msg "${PROC_NAME} - GAPS, TAP_GAPS_01 has been submitted to queue ${GAPQ}"
     else
-        log_msg "WARNING: ${TAP_COM_DIR}/tap_job_startup.sh not found"
+        log_msg "WARNING: ${TAP_SH_DIR}/tap_job_startup.sh not found"
         return 7
     fi
 
@@ -334,15 +330,15 @@ check_gsdm() {
 
     # Submit the GSDM job
     log_msg "Submitting TAP_GSDM_01 to queue ${GSDQ}"
-    if [ -x "${TAP_COM_DIR}/tap_job_startup.sh" ]; then
-        nohup "${TAP_COM_DIR}/tap_job_startup.sh" "GSDM" "01" "${GSDN}" \
+    if [ -x "${TAP_SH_DIR}/tap_job_startup.sh" ]; then
+        nohup "${TAP_SH_DIR}/tap_job_startup.sh" "GSDM" "01" "${GSDN}" \
             >> "${TAP_LOG_DIR}/tap_gsdm_01.log" 2>&1 &
         if [ $? -ne 0 ]; then
             return 7
         fi
         log_msg "${PROC_NAME} - GSDM, TAP_GSDM_01 has been submitted to queue ${GSDQ}"
     else
-        log_msg "WARNING: ${TAP_COM_DIR}/tap_job_startup.sh not found"
+        log_msg "WARNING: ${TAP_SH_DIR}/tap_job_startup.sh not found"
         return 7
     fi
 
@@ -385,11 +381,11 @@ main() {
         [ ${ora_status} -eq 3 ] && send_request "ORACLE is not running"
 
         # ---- IBCC check ----
-        check_ibcc
-        local ibcc_status=$?
-        [ ${ibcc_status} -eq 3 ] && send_request "TAP_IBCC_FILE_WARNING_LIMIT not defined"
-        [ ${ibcc_status} -eq 5 ] && send_request "TAP_IBCC_FILE_WARNING_LIMIT not defined correctly"
-        [ ${ibcc_status} -eq 7 ] && send_request "TAP_IBCC_FILE_WARNING_LIMIT has been exceeded"
+        #check_ibcc
+        #local ibcc_status=$?
+        #[ ${ibcc_status} -eq 3 ] && send_request "TAP_IBCC_FILE_WARNING_LIMIT not defined"
+        #[ ${ibcc_status} -eq 5 ] && send_request "TAP_IBCC_FILE_WARNING_LIMIT not defined correctly"
+        #[ ${ibcc_status} -eq 7 ] && send_request "TAP_IBCC_FILE_WARNING_LIMIT has been exceeded"
 
         # ---- OBCC check ----
         check_obcc

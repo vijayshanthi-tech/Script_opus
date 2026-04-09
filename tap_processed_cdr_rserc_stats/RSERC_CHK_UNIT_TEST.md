@@ -17,13 +17,11 @@ The script contains an entry-point guard that prevents `main()` from executing
 when sourced. This allows individual functions to be tested in isolation:
 
 ```bash
-# Set up a temporary test environment
-export WORK_DIR="/tmp/rserc_test_$$"
-export TAP_LOG_DIR="/tmp/rserc_test_log_$$"
-export LOG_FILE="${TAP_LOG_DIR}/rserc_chk.log"
-mkdir -p "${WORK_DIR}" "${TAP_LOG_DIR}"
-
 # Source the script (does NOT execute main)
+# The script uses its default configuration paths:
+#   TAP_LOG_DIR=/data/tap/R53_TAPLIVE/TAP/LOG
+#   LOG_FILE=/data/tap/R53_TAPLIVE/TAP/LOG/rserc_chk.log
+#   WORK_DIR=/tmp/rserc_chk_$$  (created automatically)
 source /path/to/rserc_chk.sh
 ```
 
@@ -193,15 +191,15 @@ ____________________________________________________________________
 
 **Test Steps:**
 1. Source the script
-2. Create a test file: `echo "Line 1 of report" > /tmp/test_report.lis`
-3. Run: `send_report "UT - Report Subject" "/tmp/test_report.lis" "youremail@example.com"`
+2. Create a test file: `echo "Line 1 of report" > ${WORK_DIR}/test_report.lis`
+3. Run: `send_report "UT - Report Subject" "${WORK_DIR}/test_report.lis" "youremail@example.com"`
 4. Check the recipient mailbox for the email body content
 
 **Inputs Required:**
 | Input          | Value                            |
 |----------------|----------------------------------|
 | `$1` (subject) | `"UT - Report Subject"`          |
-| `$2` (file)    | `/tmp/test_report.lis`           |
+| `$2` (file)    | `${WORK_DIR}/test_report.lis`    |
 | `$3` (recipient) | Your test email address        |
 
 **Expected Output:**
@@ -227,15 +225,15 @@ ____________________________________________________________________
 
 **Test Steps:**
 1. Source the script
-2. Create a test file: `echo "Multi-recipient test" > /tmp/test_multi.lis`
-3. Run: `send_report "UT Multi" "/tmp/test_multi.lis" "user1@test.com" "user2@test.com"`
+2. Create a test file: `echo "Multi-recipient test" > ${WORK_DIR}/test_multi.lis`
+3. Run: `send_report "UT Multi" "${WORK_DIR}/test_multi.lis" "user1@test.com" "user2@test.com"`
 4. Check both mailboxes
 
 **Inputs Required:**
 | Input            | Value                           |
 |------------------|---------------------------------|
 | `$1` (subject)   | `"UT Multi"`                   |
-| `$2` (file)      | `/tmp/test_multi.lis`          |
+| `$2` (file)      | `${WORK_DIR}/test_multi.lis`   |
 | `$3`, `$4` (recipients) | Two test addresses       |
 
 **Expected Output:**
@@ -399,17 +397,15 @@ ____________________________________________________________________
 **Purpose:** Verify no alert is sent when recent archive files exist.
 
 **Test Steps:**
-1. Create test archive dir: `mkdir -p /tmp/tap_test/ARCHIVE`
-2. Create a recent file: `touch /tmp/tap_test/ARCHIVE/cd_test.dat`
-3. Override env: `export TAP_ARCHIVE_DIR="/tmp/tap_test/ARCHIVE"`
-4. Source the script
-5. Run: `check_tap_directories`
-6. Verify NO "No Call files processed" alert in log
+1. Verify recent files exist: `find /data/tap/R53_TAPLIVE/TAP/ARCHIVE -maxdepth 1 -iname 'cd*.dat' -mmin -240 | head -5`
+2. Source the script
+3. Run: `check_tap_directories`
+4. Verify NO "No Call files processed" alert in log
 
 **Inputs Required:**
 | Input              | Value                              |
 |--------------------|------------------------------------|
-| `TAP_ARCHIVE_DIR`  | `/tmp/tap_test/ARCHIVE`           |
+| `TAP_ARCHIVE_DIR`  | `/data/tap/R53_TAPLIVE/TAP/ARCHIVE` |
 | Files in dir       | At least one `cd*.dat` < 4hr old  |
 
 **Expected Output:**
@@ -433,17 +429,18 @@ ____________________________________________________________________
 **Purpose:** Verify that an alert is sent when no `cd*.dat` files are found within 4 hours.
 
 **Test Steps:**
-1. Create empty dir: `mkdir -p /tmp/tap_test/ARCHIVE_EMPTY`
-2. Override env: `export TAP_ARCHIVE_DIR="/tmp/tap_test/ARCHIVE_EMPTY"`
+1. Verify no recent files exist: `find /data/tap/R53_TAPLIVE/TAP/ARCHIVE -maxdepth 1 -iname 'cd*.dat' -mmin -240 | wc -l` (should be 0)
+2. Temporarily move recent files out if any: `mkdir -p /data/tap/R53_TAPLIVE/TAP/ARCHIVE/ut_bak && mv /data/tap/R53_TAPLIVE/TAP/ARCHIVE/cd*.dat /data/tap/R53_TAPLIVE/TAP/ARCHIVE/ut_bak/ 2>/dev/null`
 3. Source the script
 4. Run: `check_tap_directories`
 5. Check log for: "No Call files processed by TAP collection in last four hours"
+6. Restore files: `mv /data/tap/R53_TAPLIVE/TAP/ARCHIVE/ut_bak/* /data/tap/R53_TAPLIVE/TAP/ARCHIVE/ 2>/dev/null && rmdir /data/tap/R53_TAPLIVE/TAP/ARCHIVE/ut_bak`
 
 **Inputs Required:**
-| Input              | Value                                |
-|--------------------|--------------------------------------|
-| `TAP_ARCHIVE_DIR`  | `/tmp/tap_test/ARCHIVE_EMPTY`       |
-| Files in dir       | None                                 |
+| Input              | Value                                      |
+|--------------------|--------------------------------------------|
+| `TAP_ARCHIVE_DIR`  | `/data/tap/R53_TAPLIVE/TAP/ARCHIVE`         |
+| Files in dir       | None (temporarily moved out for test)       |
 
 **Expected Output:**
 - Log contains: `No Call files processed by TAP collection in last four hours`
@@ -467,25 +464,25 @@ ____________________________________________________________________
 **Purpose:** Verify alert when collect directory has more files than MAX threshold.
 
 **Test Steps:**
-1. Create test dir: `mkdir -p /tmp/tap_test/COLLECT`
-2. Override threshold: `export MAX=2`
-3. Create 3 matching files:
+1. Check current file count: `find /data/tap/R53_TAPLIVE/TAP/COLLECT -maxdepth 1 -iname 'CD?????GBRCN*.dat' | wc -l`
+2. Lower threshold below current count: `export MAX=2`
+3. If fewer than 3 files exist, create test files:
    ```bash
-   touch /tmp/tap_test/COLLECT/CD00001GBRCN_a.dat
-   touch /tmp/tap_test/COLLECT/CD00002GBRCN_b.dat
-   touch /tmp/tap_test/COLLECT/CD00003GBRCN_c.dat
+   touch /data/tap/R53_TAPLIVE/TAP/COLLECT/CD00001GBRCN_ut_a.dat
+   touch /data/tap/R53_TAPLIVE/TAP/COLLECT/CD00002GBRCN_ut_b.dat
+   touch /data/tap/R53_TAPLIVE/TAP/COLLECT/CD00003GBRCN_ut_c.dat
    ```
-4. Override env: `export TAP_COLLECT_DIR="/tmp/tap_test/COLLECT"`
-5. Source the script
-6. Run: `check_tap_directories`
-7. Check log for "There are 3 files in tap collection"
+4. Source the script
+5. Run: `check_tap_directories`
+6. Check log for "There are N files in tap collection" (where N > MAX)
+7. Cleanup test files: `rm -f /data/tap/R53_TAPLIVE/TAP/COLLECT/CD*GBRCN_ut_*.dat`
 
 **Inputs Required:**
 | Input              | Value                              |
 |--------------------|------------------------------------|
-| `TAP_COLLECT_DIR`  | `/tmp/tap_test/COLLECT`           |
-| `MAX`              | `2` (lowered for testing)          |
-| Files              | 3 files matching `CD?????GBRCN*`   |
+| `TAP_COLLECT_DIR`  | `/data/tap/R53_TAPLIVE/TAP/COLLECT` |
+| `MAX`              | `2` (lowered for testing)            |
+| Files              | 3+ files matching `CD?????GBRCN*`    |
 
 **Expected Output:**
 - Log contains: `There are 3 files in tap collection`
@@ -508,10 +505,10 @@ ____________________________________________________________________
 **Purpose:** Verify no alert when file count is within threshold.
 
 **Test Steps:**
-1. Use same test dir with 3 files from 6.3
-2. Set threshold higher: `export MAX=400`
+1. Use actual collect directory: `/data/tap/R53_TAPLIVE/TAP/COLLECT`
+2. Set threshold to default: `export MAX=400`
 3. Source and run: `check_tap_directories`
-4. Verify NO "files in tap collection" alert in log
+4. Verify NO "files in tap collection" alert in log (file count should be below 400)
 
 **Inputs Required:**
 | Input              | Value                              |
@@ -540,23 +537,24 @@ ____________________________________________________________________
 **Purpose:** Verify per-SPID split directory threshold alerting using SPID_LIST.
 
 **Test Steps:**
-1. Create SPID list: `echo "7" > /tmp/spid_test.lis`
-2. Set: `export SPID_LIST="/tmp/spid_test.lis"`
-3. Create dir: `mkdir -p /tmp/tap_test/SPLIT/007`
-4. Create files exceeding threshold:
+1. Ensure SPID list exists: `cat "${SPID_LIST}"` (generated by `generate_spid_list`)
+2. Pick a valid SPID from the list (e.g., `7` → zero-padded to `007`)
+3. Check existing files: `ls /data/tap/R53_TAPLIVE/TAP/SPLIT/007/ | wc -l`
+4. Create test files exceeding threshold:
    ```bash
-   for i in $(seq 1 5); do touch "/tmp/tap_test/SPLIT/007/CD_test_${i}.SPLIT"; done
+   for i in $(seq 1 5); do touch "/data/tap/R53_TAPLIVE/TAP/SPLIT/007/CD_ut_test_${i}.SPLIT"; done
    ```
-5. Override: `export TAP_OB_SPLIT="/tmp/tap_test/SPLIT"` and `export SPLIT_MAX=2`
+5. Lower threshold: `export SPLIT_MAX=2`
 6. Source the script and run: `check_tap_directories`
-7. Check log for: "There are 5 files in TAP Distribute for spid 007"
+7. Check log for: "There are N files in TAP Distribute for spid 007"
+8. Cleanup test files: `rm -f /data/tap/R53_TAPLIVE/TAP/SPLIT/007/CD_ut_test_*.SPLIT`
 
 **Inputs Required:**
 | Input            | Value                              |
 |------------------|------------------------------------|
-| `TAP_OB_SPLIT`   | `/tmp/tap_test/SPLIT`             |
-| `SPLIT_MAX`      | `2` (lowered for testing)          |
-| `SPID_LIST`      | File with `7` (zero-padded to 007) |
+| `TAP_OB_SPLIT`   | `/data/tap/R53_TAPLIVE/TAP/SPLIT`  |
+| `SPLIT_MAX`      | `2` (lowered for testing)           |
+| `SPID_LIST`      | `${WORK_DIR}/spid_list.lis` (from Oracle) |
 
 **Expected Output:**
 - Log contains: `There are 5 files in TAP Distribute for spid 007`
@@ -733,17 +731,16 @@ ____________________________________________________________________
 **Purpose:** Verify that .don files trigger an alert email.
 
 **Test Steps:**
-1. Create test dir: `mkdir -p /tmp/tap_test/OG_SP`
-2. Create .don file: `touch /tmp/tap_test/OG_SP/test_file.don`
-3. Override: `export TAP_OUTGOING_SP="/tmp/tap_test/OG_SP"`
-4. Ensure no "dist" processes are running
-5. Source the script, run: `check_rserc_failures`
-6. Check log for: "RSERC Failure - Procedure 841 - *.DON files left out"
+1. Create a test .don file: `touch /data/tap/R53_TAPLIVE/TAP/OG_SP/ut_test_file.don`
+2. Ensure no "dist" or "assemb" processes are running: `ps -ef | grep -i 'assemb\|dist' | grep -v grep`
+3. Source the script, run: `check_rserc_failures`
+4. Check log for: "RSERC Failure - Procedure 841 - *.DON files left out"
+5. Cleanup test file: `rm -f /data/tap/R53_TAPLIVE/TAP/OG_SP/ut_test_file.don`
 
 **Inputs Required:**
 | Input              | Value                              |
 |--------------------|------------------------------------|
-| `TAP_OUTGOING_SP`  | `/tmp/tap_test/OG_SP`             |
+| `TAP_OUTGOING_SP`  | `/data/tap/R53_TAPLIVE/TAP/OG_SP`  |
 | .don files         | At least one present               |
 
 **Expected Output:**
@@ -768,28 +765,23 @@ ____________________________________________________________________
 **Purpose:** Verify that .tmp files trigger an alert AND automatic RSERC recovery.
 
 **Test Steps:**
-1. Create dirs:
+1. Create test .tmp and mrlog files in actual directories:
    ```bash
-   mkdir -p /tmp/tap_test/OG_SP /tmp/tap_test/PERIOD
+   touch /data/tap/R53_TAPLIVE/TAP/OG_SP/MRLOG007.tmp
+   touch /data/tap/R53_TAPLIVE/TAP/OG_SP/ut_other_file.tmp
    ```
-2. Create .tmp and mrlog files:
-   ```bash
-   touch /tmp/tap_test/OG_SP/mrlog_test_0000000000000000000000000000000000007_file.tmp
-   touch /tmp/tap_test/OG_SP/other_file.tmp
-   ```
-3. Override: `export TAP_OUTGOING_SP="/tmp/tap_test/OG_SP"`
-4. Override: `export TAP_PERIOD_DIR="/tmp/tap_test/PERIOD"`
-5. Source the script, run: `check_rserc_failures`
-6. Check log for:
+2. Ensure no "dist" or "assemb" processes are running: `ps -ef | grep -i 'assemb\|dist' | grep -v grep`
+3. Source the script, run: `check_rserc_failures`
+4. Check log for:
    - "RSERC Failure - Procudure 841" (note: typo preserved from VMS)
    - "Re-running RSERC for SP_ID: ..."
-7. Verify .tmp files were deleted: `ls /tmp/tap_test/OG_SP/*.tmp` (should fail)
+5. Verify .tmp files were deleted: `ls /data/tap/R53_TAPLIVE/TAP/OG_SP/*.tmp` (should fail)
 
 **Inputs Required:**
 | Input             | Value                                |
 |-------------------|--------------------------------------|
-| `TAP_OUTGOING_SP` | Dir with .tmp and mrlog*.tmp files   |
-| `TAP_PERIOD_DIR`  | Dir (may have .tmp to delete)        |
+| `TAP_OUTGOING_SP` | `/data/tap/R53_TAPLIVE/TAP/OG_SP` (with test .tmp files) |
+| `TAP_PERIOD_DIR`  | `/data/tap/R53_TAPLIVE/TAP/PERIOD`                       |
 | `RERUN_RSERC_SQL` | Path to valid SQL or mock script     |
 
 **Expected Output:**
@@ -810,11 +802,12 @@ ____________________________________________________________________
 ____________________________________________________________________
 ```
 
-> **Important:** The SP_ID extraction uses `awk '{ print substr($0, 35, 3) }'`.
-> The position (35) was mapped from VMS `f$extract(34,3,rec)` which operated on
-> full directory listing output. On Linux (filename only), the correct offset
-> may differ. Verify against actual `mrlog*.tmp` filenames and adjust the
-> `awk` offset if needed.
+> **Note:** The VMS original used `f$extract(34,3,rec)` at position 35 (1-based)
+> against the full VMS DIR output including the path prefix
+> `DISK$CALL_DATA:[TAP.OB.OG_SP]` (29 chars). On Linux, `basename` strips the
+> path, so the offset is position 6 (1-based) within the filename. Real VMS
+> filenames follow the format `MRLOG{3-digit-SP_ID}.TMP` (e.g. `MRLOG007.TMP`),
+> giving `awk '{ print substr($0, 6, 3) }'` → `007`.
 
 ---
 
@@ -823,15 +816,14 @@ ____________________________________________________________________
 **Purpose:** Verify that no alerts are sent when directories are clean.
 
 **Test Steps:**
-1. Create empty test dir: `mkdir -p /tmp/tap_test/OG_SP_CLEAN`
-2. Override: `export TAP_OUTGOING_SP="/tmp/tap_test/OG_SP_CLEAN"`
-3. Source the script, run: `check_rserc_failures`
-4. Verify log shows only "Checking for RSERC failures" — no alerts
+1. Verify no .don or .tmp files in actual directory: `ls /data/tap/R53_TAPLIVE/TAP/OG_SP/*.don /data/tap/R53_TAPLIVE/TAP/OG_SP/*.tmp 2>/dev/null | wc -l` (should be 0)
+2. Source the script, run: `check_rserc_failures`
+3. Verify log shows only "Checking for RSERC failures" — no alerts
 
 **Inputs Required:**
-| Input              | Value                              |
-|--------------------|------------------------------------|
-| `TAP_OUTGOING_SP`  | Empty directory                   |
+| Input              | Value                                       |
+|--------------------|---------------------------------------------|
+| `TAP_OUTGOING_SP`  | `/data/tap/R53_TAPLIVE/TAP/OG_SP` (clean)   |
 
 **Expected Output:**
 - No alert emails
@@ -901,15 +893,35 @@ ____________________________________________________________________
 **Purpose:** Verify that the script exits cleanly when the clock hour reaches 23.
 
 **Test Steps:**
-1. Start the script close to 23:00 (or mock the time)
-2. Alternatively, for faster testing, modify `check_rserc_failures` to see when hour=23 triggers exit
+1. Create a fake `date` wrapper that returns hour 23:
+   ```bash
+   mkdir -p /tmp/fake_bin
+   cat > /tmp/fake_bin/date <<'EOF'
+   #!/bin/bash
+   if [[ "$1" == "+%H" ]]; then
+     echo "23"
+   else
+     /usr/bin/date "$@"
+   fi
+   EOF
+   chmod +x /tmp/fake_bin/date
+   ```
+2. Run the script with the fake `date` first on PATH:
+   ```bash
+   PATH="/tmp/fake_bin:$PATH" ./rserc_chk.sh
+   ```
 3. Verify log shows: "RSERC_CHK completed"
 4. Verify temp files in WORK_DIR are cleaned up
+5. Cleanup the fake wrapper:
+   ```bash
+   rm -rf /tmp/fake_bin
+   ```
 
 **Inputs Required:**
-| Input       | Value              |
-|-------------|--------------------|
-| System time | Approaching 23:00  |
+| Input              | Value                                      |
+|--------------------|--------------------------------------------|
+| `/tmp/fake_bin/date` | Wrapper returning `23` for `date '+%H'`  |
+| `PATH`             | `/tmp/fake_bin` prepended to original PATH |
 
 **Expected Output:**
 - Script exits with code 0

@@ -332,8 +332,8 @@ check_tap_directories() {
 #   - Executes a single sqlplus session producing three spool files
 #   - Sends up to 3 emails (2 reports + 1 optional alert)
 #   - Creates and then deletes temporary spool files in WORK_DIR
-#   - The heredoc uses UNQUOTED delimiter (<<EOSQL) so ${FILES_CREATED}
-#     etc. expand to correct file paths inside SPOOL directives
+#   - Uses pushd/popd to run sqlplus from WORK_DIR so that SPOOL
+#     creates files there (SQL*Plus SPOOL resolves relative to CWD)
 # Usage:
 #   run_count=2
 #   generate_hourly_reports
@@ -344,9 +344,10 @@ generate_hourly_reports() {
     local FILES_CREATED1="${WORK_DIR}/files_created1.lis"
     local RECS_CREATED="${WORK_DIR}/recs_created.lis"
 
-    # Unquoted heredoc (<<EOSQL) so shell variables in SPOOL paths expand.
-    # SQL single-quotes are safe — bash heredocs do not interpret them.
-    sqlplus -s / <<EOSQL
+    # Change to WORK_DIR so SQL*Plus SPOOL creates files there, not in CWD.
+    # Quoted heredoc (<<'EOSQL') is safe — no shell variables needed inside SQL.
+    pushd "${WORK_DIR}" > /dev/null 2>&1 || true
+    sqlplus -s / <<'EOSQL'
 SET VERIFY OFF
 SET FEEDBACK OFF
 SET PAGESIZE 1
@@ -354,7 +355,7 @@ BREAK ON DAT SKIP 1
 SET NUMFORMAT 9,999,999,990
 COMPUTE SUM LABEL 'DAY TOTAL' OF FILES_PROCESSED ON DAT
 SET TRANSACTION READ ONLY;
-SPOOL ${FILES_CREATED}
+SPOOL files_created.lis
 SET HEADING OFF;
 SELECT ' ** Tap hourly report ** ' FROM DUAL;
 SET HEADING ON;
@@ -369,14 +370,14 @@ SELECT SUBSTR(TO_CHAR(OOCF_CREATED_DTTM,'YYYY-MM-DD HH24'),1,10) DAT,
  ORDER BY TO_CHAR(OOCF_CREATED_DTTM,'YYYY-MM-DD HH24');
 SPOOL OFF
 SET NUMFORMAT 999999999
-SPOOL ${FILES_CREATED1}
+SPOOL files_created1.lis
 SELECT 'FILE_COUNT=',COUNT(*) FROM outgoing_outbound_call_files
  WHERE TRUNC(OOCF_CREATED_DTTM)=TRUNC(SYSDATE-4/24);
 SPOOL OFF
 BREAK ON DATR SKIP 1
 SET NUMFORMAT 9,999,999,990
 COMPUTE SUM LABEL 'DAY TOTAL' OF RECORDS_PROCESSED ON DATR
-SPOOL ${RECS_CREATED}
+SPOOL recs_created.lis
 SET HEADING OFF;
 SELECT ' ** Tap hourly report for incoming roaming CDRs** ' FROM DUAL;
 SET HEADING ON;
@@ -392,6 +393,7 @@ SELECT SUBSTR(TO_CHAR(PS_RUN_DTTM,'YYYY-MM-DD HH24'),1,10) DATR,
 SPOOL OFF
 EXIT
 EOSQL
+    popd > /dev/null 2>&1 || true
 
     # ---- Email RSERC file report ----
     if [ -f "${FILES_CREATED}" ]; then
@@ -507,13 +509,14 @@ check_rserc_failures() {
         find "${TAP_PERIOD_DIR}" -maxdepth 1 -iname '*.tmp' -delete 2>/dev/null
 
         # VMS: sort/nodup/key=(pos:35,siz=3) mrlog.lis
-        # VMS f$extract(34,3,rec) operates on full VMS DIR output (includes path).
-        # On Linux we output filenames only. Position 35 (1-based awk) must be
-        # verified against actual mrlog filenames. Adjust offset if SP_ID is
-        # at a different position in the filename.
+        # VMS f$extract(34,3,rec) operates on full VMS DIR output that
+        # includes the path prefix DISK$CALL_DATA:[TAP.OB.OG_SP] (29 chars).
+        # Position 35 (1-based) in VMS = position 6 within the filename.
+        # Real filenames are MRLOG{SP_ID}.TMP (e.g. MRLOG007.TMP), so the
+        # SP_ID starts at character 6 of the filename (1-based awk).
         if [ -s "${MRLOG_LIS}" ]; then
             local MRLOG_SORTED="${WORK_DIR}/mrlog_sorted.lis"
-            awk '{ print substr($0, 35, 3) }' "${MRLOG_LIS}" | sort -u > "${MRLOG_SORTED}"
+            awk '{ print substr($0, 6, 3) }' "${MRLOG_LIS}" | sort -u > "${MRLOG_SORTED}"
 
             while IFS= read -r sp_id; do
                 sp_id=$(echo "${sp_id}" | tr -d '[:space:]')
