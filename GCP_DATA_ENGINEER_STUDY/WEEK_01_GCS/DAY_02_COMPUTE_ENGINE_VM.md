@@ -338,6 +338,20 @@ NAME          ZONE             MACHINE_TYPE  PREEMPTIBLE  INTERNAL_IP  EXTERNAL_
 lab-vm-day2   europe-west2-a   e2-micro                   10.154.0.X   34.89.XX.XX   RUNNING
 ```
 
+**Actual output**
+vijibrabhaharan@cloudshell:~ (gcp-fundamentals-lab-492711)$ gcloud compute instances create lab-vm-day2 --zone=europe-west2-a --machine-type=e2-micro --image-family=debian-12 --image-project=debian-cloud --boot-disk-size=10GB --boot-disk-type=pd-balanced --tags=lab-vm --labels=env=learning,day=2 --metadata=startup-script='#!/bin/bash
+echo "VM created on $(date)" > /tmp/startup-log.txt
+apt-get update -qq
+apt-get install -y -qq tree htop jq'
+Created [https://www.googleapis.com/compute/v1/projects/gcp-fundamentals-lab-492711/zones/europe-west2-a/instances/lab-vm-day2].
+NAME: lab-vm-day2
+ZONE: europe-west2-a
+MACHINE_TYPE: e2-micro
+PREEMPTIBLE: 
+INTERNAL_IP: 10.154.0.2
+EXTERNAL_IP: 35.230.139.39
+STATUS: RUNNING
+
 > **What each flag does:**
 
 | Flag | Purpose |
@@ -375,6 +389,8 @@ your-username@lab-vm-day2:~$
 ```
 
 > **Take a screenshot here for your deliverable!** This proves SSH access is working.
+
+![alt text](image.png)
 
 ---
 
@@ -438,6 +454,8 @@ Filesystem      Size  Used Avail Use% Mounted on
 /dev/sda1       9.8G  1.5G  7.9G  16% /
 ```
 
+**Actual Output**
+![alt text](image-1.png)
 ---
 
 ### Step 5: Query Instance Metadata from Inside the VM (10 min)
@@ -506,6 +524,8 @@ Also try a summary table:
 # List all VMs
 gcloud compute instances list
 
+![alt text](image-2.png)
+
 # Formatted output for your notes
 gcloud compute instances describe lab-vm-day2 \
   --zone=europe-west2-a \
@@ -519,7 +539,7 @@ gcloud compute instances describe lab-vm-day2 \
     disks[0].diskSizeGb:label=DISK_GB
   )"
 ```
-
+![alt text](image-3.png)
 ---
 
 ### Step 7: Create the Same VM via Console (Optional - 10 min)
@@ -541,6 +561,8 @@ For comparison, create a VM using the Console UI:
 
 3. **Before clicking Create**, click **"Equivalent command line"** at the bottom — this gives you the exact `gcloud` command
 4. Click **CREATE**
+
+![alt text](image-4.png)
 
 ---
 
@@ -567,7 +589,9 @@ gcloud compute instances list
 ```
 Listed 0 items.
 ```
+**Actual Output**
 
+![alt text](image-5.png)
 ---
 
 ## Part 3: Revision (15 minutes)
