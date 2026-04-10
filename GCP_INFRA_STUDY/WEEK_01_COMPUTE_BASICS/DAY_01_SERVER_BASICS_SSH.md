@@ -141,11 +141,29 @@ gcloud compute instances create ssh-lab-vm \
   --image-project=debian-cloud \
   --metadata=enable-oslogin=TRUE
 
+**Actual Output**
+
+ vijibrabhaharan@cloudshell:~ (gcp-fundamentals-lab-492711)$ gcloud compute instances create ssh-lab-vm --zone=europe-west2-a --machine-type=e2-micro --image-family=debian-12 --image-project=debian-cloud --metadata=enable-oslogin=TRUE
+Created [https://www.googleapis.com/compute/v1/projects/gcp-fundamentals-lab-492711/zones/europe-west2-a/instances/ssh-lab-vm].
+NAME: ssh-lab-vm
+ZONE: europe-west2-a
+MACHINE_TYPE: e2-micro
+PREEMPTIBLE: 
+INTERNAL_IP: 10.154.0.4
+EXTERNAL_IP: 34.89.8.44
+STATUS: RUNNING
+vijibrabhaharan@cloudshell:~ (gcp-fundamentals-lab-492711)$ 
+
 # Verify OS Login is set
 gcloud compute instances describe ssh-lab-vm \
   --zone=europe-west2-a \
   --format="value(metadata.items)"
 ```
+**Actual output**
+vijibrabhaharan@cloudshell:~ (gcp-fundamentals-lab-492711)$ gcloud compute instances describe ssh-lab-vm --zone=europe-west2-a --format="value(metadata.items)"
+{'key': 'enable-oslogin', 'value': 'TRUE'}
+vijibrabhaharan@cloudshell:~ (gcp-fundamentals-lab-492711)$ 
+
 
 ### Step 3: SSH Using gcloud (5 min)
 
@@ -181,6 +199,49 @@ gcloud compute ssh private-ssh-vm \
   --zone=europe-west2-a \
   --tunnel-through-iap
 
+**Actual Output**
+
+vijibrabhaharan@cloudshell:~ (gcp-fundamentals-lab-492711)$ gcloud services enable iap.googleapis.com
+Operation "operations/acat.p2-100267315481-e3ca8d85-ab9e-441f-b63d-26e896a399ca" finished successfully.
+vijibrabhaharan@cloudshell:~ (gcp-fundamentals-lab-492711)$ gcloud compute firewall-rules create allow-ssh-from-iap \
+  --direction=INGRESS \
+  --network=default \
+  --action=ALLOW \
+  --rules=tcp:22 \
+  --source-ranges=35.235.240.0/20
+Creating firewall...working..Created [https://www.googleapis.com/compute/v1/projects/gcp-fundamentals-lab-492711/global/firewalls/allow-ssh-from-iap].      
+Creating firewall...done.                                                                                                                                   
+NAME: allow-ssh-from-iap
+NETWORK: default
+DIRECTION: INGRESS
+PRIORITY: 1000
+ALLOW: tcp:22
+DENY: 
+DISABLED: False
+vijibrabhaharan@cloudshell:~ (gcp-fundamentals-lab-492711)$ gcloud compute instances describe private-ssh-vm \
+  --zone=europe-west2-a \
+  --format="value(status)"
+RUNNING
+vijibrabhaharan@cloudshell:~ (gcp-fundamentals-lab-492711)$ gcloud compute ssh private-ssh-vm \
+  --zone=europe-west2-a \
+  --tunnel-through-iap
+WARNING: 
+
+To increase the performance of the tunnel, consider installing NumPy. For instructions,
+please see https://cloud.google.com/iap/docs/using-tcp-forwarding#increasing_the_tcp_upload_bandwidth
+
+Warning: Permanently added 'compute.369144874436753747' (ED25519) to the list of known hosts.
+Linux private-ssh-vm 6.1.0-43-cloud-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.162-1 (2026-02-08) x86_64
+
+The programs included with the Debian GNU/Linux system are free software;
+the exact distribution terms for each program are described in the
+individual files in /usr/share/doc/*/copyright.
+
+Debian GNU/Linux comes with ABSOLUTELY NO WARRANTY, to the extent
+permitted by applicable law.
+Creating directory '/home/vijibrabhaharan_gmail_com'.
+vijibrabhaharan_gmail_com@private-ssh-vm:~$ 
+
 # Verify: no external IP
 curl -s -H "Metadata-Flavor: Google" \
   http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip
@@ -191,9 +252,30 @@ exit
 
 ### Step 5: Restrict SSH via Firewall (10 min)
 
+1, Exit the private VM first:
+2, Run curl ifconfig.me from Cloud Shell (Step 5 is meant to be run from Cloud Shell, not from inside the VM):
+
+That's expected — private-ssh-vm has no external IP and no internet access. It can't reach ifconfig.me (or any external site).
+
+This confirms the whole point of Step 4: this VM is completely isolated from the internet, yet you were still able to SSH into it via IAP.
+
 ```bash
 # Find your current public IP
 curl ifconfig.me
+
+vijibrabhaharan_gmail_com@private-ssh-vm:~$ curl ifconfig.me
+
+curl: (28) Failed to connect to ifconfig.me port 80 after 130121 ms: Couldn't connect to server
+vijibrabhaharan_gmail_com@private-ssh-vm:~$ 
+vijibrabhaharan_gmail_com@private-ssh-vm:~$ exit
+logout
+Connection to compute.369144874436753747 closed.
+vijibrabhaharan@cloudshell:~ (gcp-fundamentals-lab-492711)$ curl ifconfig.me
+34.126.84.70
+vijibrabhaharan@cloudshell:~ (gcp-fundamentals-lab-492711)$
+
+**Key takeaway to note**
+: A VM with --no-address has no outbound internet either — not just no inbound. It can only communicate within the VPC (and via IAP tunnel for management). In production, if a private VM needs to reach the internet (e.g., for apt update), you'd use a Cloud NAT.
 
 # Create a firewall rule allowing SSH only from your IP
 gcloud compute firewall-rules create allow-ssh-my-ip \
