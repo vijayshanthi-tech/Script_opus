@@ -1,7 +1,7 @@
 #!/bin/bash
 ###############################################################################
-# Script Name   : tap_rsercfiles_transfer.sh
-# Converted From: TAP_RSERCFILES_TRANSFER.COM (VMS DCL)
+# Script Name   : tap_rserc_transfer_abs_v2.sh
+# Converted From: TAP_RSERCFILES_TRANSFER.COM (VMS DCL) — NEW VERSION
 # Description   : Transfers generated RSERC and MRLOG files from the TAP
 #                 system to the ABS system via SFTP. Runs continuously,
 #                 batching up to 50 files of each type per cycle. Uses a
@@ -15,6 +15,20 @@
 # Original Author : Mahalakshmi / Arul Mani (VMS legacy)
 # Converted By    : VMS-to-Linux conversion
 #
+# Version History:
+#   v1  — Initial conversion from OLD COM script
+#   v2  — Updated to match NEW COM script changes:
+#         - Added OLD_SER pre-check in self_recovery
+#         - Added MAIN_RECOVERY section with external recovery job call
+#         - Changed remote directory to /DISK$BME_APPS/BME/TAP/INPUT/
+#         - RSERC files renamed to .BCKUP instead of deleted
+#         - RSERC remote rename now inline in SFTP batch (no separate step)
+#         - MRLOG files use .DAT extension directly (no .sftp_tmp_rs)
+#         - Added backup archival step in main_loop
+#         - Added pre-rename of RSERC to .OLD_SER before main loop
+#         - Added hour=23 auto-shutdown check
+#         - External recovery script (tranfer_rserc_recovery.sh) ACTIVE
+#
 # VMS Sections Mapped:
 #   SAVE_ENVIRONMENT       -> Configuration section + lock file
 #   CHECK_INSTANCES        -> acquire_lock()  (flock-based)
@@ -22,6 +36,7 @@
 #   HOUSE_KEEP             -> housekeeping()
 #   EXTRACT_SFTP           -> read_sftp_config()
 #   SELF_RECOVERY          -> self_recovery()
+#   MAIN_RECOVERY          -> main_recovery()           [NEW v2]
 #   MAIN_LOOP              -> main_loop()
 #   RSERC_FILE_COUNT       -> collect_rserc_files()
 #   MRLOG_FILE_COUNT       -> collect_mrlog_files()
@@ -36,59 +51,66 @@
 #   3. All directory environment variables set (see CONFIGURATION below)
 #   4. RSERC_TRANS_SHUTDOWN env var or flag file for graceful shutdown
 #   5. Write access to SFTP_TMP_DIR, TAP_DAT_DIR, TAP_LOG_DIR
+#   6. [NEW v2] tranfer_rserc_recovery.sh in TAP_COM_DIR
+#   7. [NEW v2] FCS_ARCHIVE_DIR for backup archival
 ###############################################################################
-
+ 
 set -o pipefail
-
+ 
 ###############################################################################
 #                       CONFIGURATION
 ###############################################################################
-
+ 
 # --- Directory mappings (VMS logical -> Linux path) ---
 # Defaults can be overridden via environment variables (for testing/deployment)
 TAP_CFG_DIR="${TAP_CFG_DIR:-/app/tap/R53_TAPLIVE/TAP/CFG}"
 TAP_DAT_DIR="${TAP_DAT_DIR:-/data/tap/R53_TAPLIVE/TAP/DAT}"
 TAP_LOG_DIR="${TAP_LOG_DIR:-/data/tap/R53_TAPLIVE/TAP/LOG}"
-TAP_COM_DIR="${TAP_COM_DIR:-/app/tap/R53_TAPLIVE/TAP/COM}"
+TAP_SH_DIR="${TAP_SH_DIR:-/app/tap/R53_TAPLIVE/TAP/SH}"
 FCS_RSERC_DIR="${FCS_RSERC_DIR:-/data/tap/R53_TAPLIVE/TAP/FCS_RSERC}"
 TAP_RSERC_DIR="${TAP_RSERC_DIR:-/data/tap/R53_TAPLIVE/TAP/RSERC}"
 SFTP_TMP_DIR="${SFTP_TMP_DIR:-/data/tap/R53_TAPLIVE/TAP/DAT/SFTP_TMP}"
-
+ 
+## [NEW v2] Archive directory for RSERC backups (VMS: DISK$CALL_DATA2:[TAP.OB.FCS_ARCHIVE])
+TAP_FCS_ARCHIVE="${TAP_FCS_ARCHIVE:-/data/tap/R53_TAPLIVE/TAP/FCS_ARCHIVE}"
+ 
 # --- Shutdown controls (VMS: RSERC_TRANS_SHUTDOWN logical, TAP_CLOSEDOWN_ALL) ---
 RSERC_TRANS_SHUTDOWN="${RSERC_TRANS_SHUTDOWN:-N}"
-# When set to "N", time-based closedown is disabled (VMS: comparing a timestamp
-# against "N" always evaluates false because digits sort before letters).
 TAP_CLOSEDOWN_ALL="${TAP_CLOSEDOWN_ALL:-N}"
-
+ 
 # --- SFTP config file (VMS: TAP_CFG_DIR:RSERC_SFTP.CFG) ---
+# SFTP credentials (DEST_USERNAME, DEST_HOSTNAME) are ALWAYS read from this
+# config file via read_sftp_config(). They are NEVER hardcoded in the script.
 SFTP_CFG_FILE="${TAP_CFG_DIR}/RSERC_SFTP.CFG"
-
+ 
 # --- Batch size limit (VMS: .GT. 50) ---
 MAX_BATCH_SIZE=50
-
-# --- Remote directory on ABS server (VMS: "cd xi_dat") ---
-REMOTE_DIR="xi_dat"
-
+ 
+## [NEW v2] Remote directory on ABS server
+## OLD: REMOTE_DIR="xi_dat"
+## NEW: Changed to absolute path per new COM script
+REMOTE_DIR="/home/brabhav/BME/TAP/INPUT"
+ 
 # --- Log file ---
 SCRIPT_NAME="$(basename "$0" .sh)"
-LOG_FILE="${TAP_LOG_DIR}/${SCRIPT_NAME}.log"
-
+LOG_FILE="${TAP_LOG_DIR}/${SCRIPT_NAME}_$(date '+%Y%m%d').log"
+ 
 # --- Lock file for single-instance enforcement ---
-LOCK_FILE="/var/lock/${SCRIPT_NAME}.lock"
-
+LOCK_FILE="/tmp/${SCRIPT_NAME}.lock"
+ 
 # --- Flag file for in-progress tracking (VMS: SFTP_ABS_IN_PROGRESS.FLAG) ---
 FLAG_FILE="${TAP_DAT_DIR}/SFTP_ABS_IN_PROGRESS.FLAG"
-
+ 
 # --- Guard against double cleanup ---
 _CLEANUP_DONE=0
-
+ 
 # --- File descriptor for lock ---
 LOCK_FD=9
-
+ 
 ###############################################################################
 #                       FUNCTIONS
 ###############################################################################
-
+ 
 # ---- Logging helper (VMS: @TAP_COM_DIR:TAPLOG_MESS + WSO) ----
 log_msg() {
     local msg="$1"
@@ -96,40 +118,39 @@ log_msg() {
     dttm=$(date '+%d-%b-%Y %H:%M:%S')
     echo "${dttm} - ${msg}" | tee -a "${LOG_FILE}"
 }
-
+ 
 # ---- Error exit (VMS: ERROR section) ----
-# Logs error, optionally notifies operator, exits with code 4
 error_exit() {
     local error_text="$1"
     local phase="${2:-UNKNOWN}"
-
+ 
     log_msg "ERROR: *** ${SCRIPT_NAME} - ${phase}, ${error_text}"
-
+ 
     # VMS: REQUEST/REPLY/TO=OPER — log to syslog as substitute
     logger -t "${SCRIPT_NAME}" "ERROR - ${phase}: ${error_text}"
-
+ 
     cleanup_and_exit 4
 }
-
+ 
 # ---- Cleanup (VMS: EXIT section + temp file removal) ----
 cleanup_and_exit() {
     local exit_code="${1:-0}"
-
+ 
     if [ "${_CLEANUP_DONE}" -eq 1 ]; then
         exit "${exit_code}"
     fi
     _CLEANUP_DONE=1
-
+ 
     log_msg "${SCRIPT_NAME} exiting with code ${exit_code} at $(date '+%d-%b-%Y %H:%M:%S')"
-
+ 
     # Release lock
     if [ -n "${LOCK_FD}" ]; then
         eval "exec ${LOCK_FD}>&-" 2>/dev/null
     fi
-
+ 
     exit "${exit_code}"
 }
-
+ 
 # ---- Acquire exclusive lock (VMS: SET PROCESS /NAME= for instance check) ----
 acquire_lock() {
     eval "exec ${LOCK_FD}>${LOCK_FILE}"
@@ -138,13 +159,13 @@ acquire_lock() {
         exit 0
     fi
 }
-
+ 
 # ---- Validate environment (VMS: logical name checks) ----
 validate_environment() {
     local phase="VALIDATE_ENVIRONMENT"
-
-    # Check required directories exist
-    for dir_var in TAP_CFG_DIR TAP_DAT_DIR TAP_LOG_DIR FCS_RSERC_DIR TAP_RSERC_DIR SFTP_TMP_DIR; do
+ 
+    ## [NEW v2] Added FCS_ARCHIVE_DIR to validation list
+    for dir_var in TAP_CFG_DIR TAP_DAT_DIR TAP_LOG_DIR FCS_RSERC_DIR TAP_RSERC_DIR SFTP_TMP_DIR TAP_FCS_ARCHIVE; do
         local dir_val="${!dir_var}"
         if [ -z "${dir_val}" ]; then
             error_exit "*** Fatal: Environment variable ${dir_var} is not set." "${phase}"
@@ -153,230 +174,239 @@ validate_environment() {
             error_exit "*** Fatal: Directory ${dir_val} (${dir_var}) does not exist." "${phase}"
         fi
     done
-
-    # Check SFTP config file exists
+ 
     if [ ! -f "${SFTP_CFG_FILE}" ]; then
         error_exit "ERROR WHILE SEARCHING FOR ${SFTP_CFG_FILE} FILE" "${phase}"
     fi
 }
-
+ 
 # ---- Housekeeping (VMS: HOUSE_KEEP — delete logs older than 7 days) ----
 housekeeping() {
     log_msg "Housekeeping: removing log files older than 7 days"
-    find "${TAP_LOG_DIR}" -maxdepth 1 -name "${SCRIPT_NAME}.log.*" -mtime +7 -delete 2>/dev/null || true
+    #find "${TAP_LOG_DIR}" -maxdepth 1 -name "${SCRIPT_NAME}.log.*" -mtime +7 -delete 2>/dev/null || true
+    find "${TAP_LOG_DIR}" -maxdepth 1 -name "${SCRIPT_NAME}_*.log" -mtime +7 -delete 2>/dev/null || true
+ 
+    ## [NEW v2] Placeholder for .BCKUP cleanup (VMS: DELETE/BEFORE="TODAY-3-00" FCS_RSERC_DIR:RSERC%%%%%%.BCKUP;*)
+    ## Uncomment when backup retention policy is confirmed:
+    # log_msg "Housekeeping: removing BCKUP files older than 3 days"
+    # find "${FCS_RSERC_DIR}" -maxdepth 1 -name 'RSERC??????_*.BCKUP' -mtime +3 -delete 2>/dev/null || true
 }
-
+ 
 # ---- Read SFTP config (VMS: EXTRACT_SFTP — read username and hostname) ----
+# Reads DEST_USERNAME and DEST_HOSTNAME from RSERC_SFTP.CFG
+# Credentials are NEVER hardcoded — always read from this config file
 read_sftp_config() {
     local phase="EXTRACT_SFTP"
-
+ 
     if [ ! -f "${SFTP_CFG_FILE}" ]; then
         error_exit "SFTP config file not found: ${SFTP_CFG_FILE}" "${phase}"
     fi
-
+ 
     # VMS: line 1 = username, line 2 = hostname
     {
         read -r DEST_USERNAME
         read -r DEST_HOSTNAME
     } < "${SFTP_CFG_FILE}"
-
+ 
     if [ -z "${DEST_USERNAME}" ] || [ -z "${DEST_HOSTNAME}" ]; then
         error_exit "SFTP config file is incomplete (need username and hostname)" "${phase}"
     fi
-
+ 
     log_msg "SFTP target: ${DEST_USERNAME}@${DEST_HOSTNAME}"
 }
-
+ 
+# ---- [NEW v2] Main Recovery (VMS: MAIN_RECOVERY section) ----
+# Called when SFTP_ABS_IN_PROGRESS.FLAG is found during self_recovery
+# 1. Renames current RSERC .DAT files to .OLD_SER (safety backup)
+# 2. Calls external recovery script (tranfer_rserc_recovery.sh)
+# 3. Loops back to self_recovery for re-verification
+main_recovery() {
+    local phase="MAIN_RECOVERY"
+    log_msg "MAIN_RECOVERY: Unrecovered previous failure found"
+ 
+    # Rename current RSERC *.DAT to *.OLD_SER for safety
+    # (VMS: RENAME/LOG FCS_RSERC_DIR:RSERC*.DAT;*/BEF *.OLD_SER;*)
+    log_msg "Renaming RSERC .DAT files to .OLD_SER for recovery"
+    for dat_file in "${FCS_RSERC_DIR}"/RSERC*.DAT; do
+        if [ -f "${dat_file}" ]; then
+            local base
+            base=$(basename "${dat_file}" .DAT)
+            mv -v "${dat_file}" "${FCS_RSERC_DIR}/${base}.OLD_SER" 2>&1 | tee -a "${LOG_FILE}"
+        fi
+    done
+ 
+    ## =========================================================================
+    ## [NEW v2] EXTERNAL SCRIPT CALL — TRANFER_RSERC_RECOVERY
+    ## =========================================================================
+    ## VMS ORIGINAL:
+    ##   SUBMIT/LOG=DSA10:[TAP.LOG]TRANFER_RSERC_RECOVERY.LOG
+    ##     DISK$CALL_DATA:[TAP.COM]TRANFER_RSERC_RECOVERY.COM;
+    ##     /NOTIFY/USER=TAPLIVE/NAME=TRANFER_RSERC_RECOVERY
+    ##   SYNCHRONIZE TRANFER_RSERC_RECOVERY
+    ##
+    ## Linux equivalent: Run the converted recovery script synchronously.
+    ## SFTP credentials are read from RSERC_SFTP.CFG inside the recovery
+    ## script — no hardcoded usernames or hostnames.
+    ## =========================================================================
+    local recovery_script="${TAP_SH_DIR}/tranfer_rserc_recovery.sh"
+ 
+    if [ ! -f "${recovery_script}" ]; then
+        error_exit "Recovery script not found: ${recovery_script}" "${phase}"
+    fi
+ 
+    log_msg "Submitting recovery job: ${recovery_script}"
+    if ! bash "${recovery_script}" >> "${TAP_LOG_DIR}/tranfer_rserc_recovery.log" 2>&1; then
+        error_exit "Recovery job TRANFER_RSERC_RECOVERY failed" "${phase}"
+    fi
+ 
+    log_msg "Recovery job completed — looping back to self_recovery for re-check"
+    # VMS: GOTO SELF_RECOVERY — loop back to re-verify everything is clean
+    self_recovery
+    return $?
+}
+ 
 # ---- Self-recovery (VMS: SELF_RECOVERY section) ----
-# Cleans up from a previous failed transfer attempt
 self_recovery() {
     local phase="SELF_RECOVERY"
     log_msg "Checking for recovery from previous failure"
-
-    # Clean temp directory (VMS: DELETE SFTP_TMP_DIR:*.*;*)
-    rm -f "${SFTP_TMP_DIR:?}"/* 2>/dev/null || true
-
+ 
+    ## [NEW v2] Pre-check: Look for leftover .OLD_SER files from a previous failed recovery
+    local old_ser_count
+    old_ser_count=$(find "${FCS_RSERC_DIR}" -maxdepth 1 -name 'RSERC*.OLD_SER' 2>/dev/null | wc -l)
+    if [ "${old_ser_count}" -gt 0 ]; then
+        log_msg "RECOVERY FAILED AND OLD RSERC'S FOUND, DROPPING ALERT MAIL TO L2"
+        error_exit "OLD RSERC'S FOUND IN TAP RECOVERY NOT SUCCESSFULL - CALLOUT FOR L2" "${phase}"
+    fi
+ 
+    ## [NEW v2] SFTP_TMP_DIR cleanup removed per new COM (commented out in VMS)
+    # rm -f "${SFTP_TMP_DIR:?}"/* 2>/dev/null || true
+ 
     # Check if a previous transfer was in progress
     if [ ! -f "${FLAG_FILE}" ]; then
         log_msg "No recovery needed"
         return 0
     fi
-
-    log_msg "Found in-progress flag — performing recovery"
-    rm -f "${FLAG_FILE}"
-
-    # RECOVERY_1: If SFTP control file exists, remote files may have partial uploads
-    # Note: must match the lowercase name used in main_loop() — Linux is case-sensitive
-    local ctrl_file="${TAP_DAT_DIR}/sftp_ctrl_file.dat"
-    if [ -f "${ctrl_file}" ]; then
-        log_msg "Recovery stage 1: Removing partial uploads from remote server"
-
-        # Create SFTP batch to remove partial files on remote
-        local recover_batch="${TAP_DAT_DIR}/sftp_recover.dat"
-        cat > "${recover_batch}" <<EOF
-cd ${REMOTE_DIR}
-rm *.sftp_tmp_rs
-exit
-EOF
-        if ! sftp -b "${recover_batch}" "${DEST_USERNAME}@${DEST_HOSTNAME}"; then
-            error_exit "ERROR WHILE RECOVERING THE PREVIOUS FAILURE - Remove SFTP PROCESS" "${phase}"
-        fi
-        rm -f "${recover_batch}"
-        rm -f "${ctrl_file}"
-        rm -f "${TAP_DAT_DIR}/rename_sftpd_files_tmp.sh"
-        rm -f "${TAP_DAT_DIR}/delete_sftpd_files_tmp.sh"
-        return 0
-    fi
-
-    # RECOVERY_2: If rename script exists, uploads completed but rename didn't
-    # VMS: This section is commented out in original — rename recovery disabled
-    # The original VMS code has RECOVERY_2 commented out, so we skip it too
-    local ren_file="${TAP_DAT_DIR}/rename_sftpd_files_tmp.sh"
-    if [ -f "${ren_file}" ]; then
-        log_msg "Recovery stage 2: Rename script found but recovery skipped (as per VMS original)"
-        # Note: VMS original has this section commented out
-        # If needed in future, would run SFTP rename batch here
-        error_exit "ERROR WHILE RECOVERING THE PREVIOUS FAILURE - Rename SFTP PROCESS" "${phase}"
-    fi
-
-    # RECOVERY_3: If delete script exists, remote side is done but local cleanup didn't complete
-    local del_file="${TAP_DAT_DIR}/delete_sftpd_files_tmp.sh"
-    if [ -f "${del_file}" ]; then
-        log_msg "Recovery stage 3: Running pending local file deletions"
-        if ! bash "${del_file}"; then
-            error_exit "ERROR WHILE RECOVERING THE PREVIOUS FAILURE - Delete in TAP XI_DAT" "${phase}"
-        fi
-        rm -f "${del_file}"
-    fi
+ 
+    ## [NEW v2] When flag file is found, go to MAIN_RECOVERY
+    log_msg "Found in-progress flag — performing recovery via MAIN_RECOVERY"
+    main_recovery
+    return $?
 }
-
+ 
 # ---- Collect RSERC files for transfer ----
-# VMS: RSERC_FILE_COUNT loop — searches FCS_RSERC_DIR:RSERC%%%%%%.DAT
-# Copies to temp dir with .sftp_tmp_rs extension, adds to batch files
-# Returns: sets RSERC_COUNT variable
+# [NEW v2] Changes:
+#   - Remote rename is now INLINE in SFTP batch
+#   - Source files RENAMED to .BCKUP instead of DELETED
 collect_rserc_files() {
     RSERC_COUNT=0
-    local sftp_fd="$1"      # File descriptor for SFTP batch commands
-    local rename_fd="$2"    # File descriptor for remote rename commands
-    local delete_fd="$3"    # File descriptor for local delete commands
-
-    # VMS pattern RSERC%%%%%%.DAT -> bash pattern RSERC??????.DAT
+    local sftp_fd="$1"
+    local delete_fd="$2"
+ 
     while IFS= read -r -d '' rserc_file; do
         if [ "${RSERC_COUNT}" -ge "${MAX_BATCH_SIZE}" ]; then
             break
         fi
-
+ 
         local filename
         filename=$(basename "${rserc_file}")
         local name="${filename%.*}"
         local tmp_name="${name}.sftp_tmp_rs"
-
-        # Copy to temp dir with temporary extension (VMS: COPY/LOG)
+ 
         if cp "${rserc_file}" "${SFTP_TMP_DIR}/${tmp_name}"; then
+            ## [NEW v2] Upload AND rename in the SAME SFTP batch (inline)
             echo "put ${tmp_name}" >> "${sftp_fd}"
-            echo "rename ${tmp_name} ${filename}" >> "${rename_fd}"
-            echo "rm -f \"${rserc_file}\"" >> "${delete_fd}"
+            echo "rename ${tmp_name} ${filename}" >> "${sftp_fd}"
+ 
+            ## [NEW v2] RENAME source to .BCKUP instead of DELETE
+            echo "mv \"${rserc_file}\" \"${FCS_RSERC_DIR}/${name}.BCKUP\"" >> "${delete_fd}"
+ 
             RSERC_COUNT=$((RSERC_COUNT + 1))
             log_msg "Staged RSERC file: ${filename}"
         else
             log_msg "WARNING: Failed to copy ${rserc_file} to staging"
         fi
-    done < <(find "${FCS_RSERC_DIR}" -maxdepth 1 -name 'RSERC??????.DAT' -print0 2>/dev/null)
+done < <(find "${FCS_RSERC_DIR}" -maxdepth 1 -name 'RSERC??????_*.DAT' -print0 2>/dev/null)
 }
-
+ 
 # ---- Collect MRLOG files for transfer ----
-# VMS: MRLOG_FILE_COUNT loop — searches TAP_RSERC_DIR:MRLOG%%%%%%.DAT
-# Same approach as RSERC collection
-# Returns: sets MRLOG_COUNT variable
+# [NEW v2] Changes:
+#   - MRLOG files now use .DAT extension directly (no .sftp_tmp_rs)
+#   - No remote rename needed
 collect_mrlog_files() {
     MRLOG_COUNT=0
     local sftp_fd="$1"
-    local rename_fd="$2"
-    local delete_fd="$3"
-
-    # VMS pattern MRLOG%%%%%%.DAT -> bash pattern MRLOG??????.DAT
+    local delete_fd="$2"
+ 
     while IFS= read -r -d '' mrlog_file; do
         if [ "${MRLOG_COUNT}" -ge "${MAX_BATCH_SIZE}" ]; then
             break
         fi
-
+ 
         local filename
         filename=$(basename "${mrlog_file}")
         local name="${filename%.*}"
-        local tmp_name="${name}.sftp_tmp_rs"
-
+ 
+        ## [NEW v2] Use .DAT extension directly — no temporary extension
+        local tmp_name="${name}.DAT"
+ 
         if cp "${mrlog_file}" "${SFTP_TMP_DIR}/${tmp_name}"; then
+            ## [NEW v2] Upload only — no rename needed
             echo "put ${tmp_name}" >> "${sftp_fd}"
-            echo "rename ${tmp_name} ${filename}" >> "${rename_fd}"
             echo "rm -f \"${mrlog_file}\"" >> "${delete_fd}"
             MRLOG_COUNT=$((MRLOG_COUNT + 1))
             log_msg "Staged MRLOG file: ${filename}"
         else
             log_msg "WARNING: Failed to copy ${mrlog_file} to staging"
         fi
-    done < <(find "${TAP_RSERC_DIR}" -maxdepth 1 -name 'MRLOG??????.DAT' -print0 2>/dev/null)
+done < <(find "${TAP_RSERC_DIR}" -maxdepth 1 -name 'MRLOG??????_*.DAT' -print0 2>/dev/null)
+ 
 }
-
+ 
 # ---- SFTP transfer process ----
-# VMS: SFTP_PROCESS section
-# 1. Upload files via SFTP batch
-# 2. Rename files on remote (.sftp_tmp_rs -> .DAT)
-# 3. Delete local source files
+# [NEW v2] Separate rename SFTP call REMOVED — rename is inline
 sftp_transfer() {
     local phase="SFTP_PROCESS"
     local sftp_batch="$1"
-    local rename_batch="$2"
-    local delete_script="$3"
-
+    local delete_script="$2"
+ 
     log_msg "SFTP PROCESS FOR TRANSFER OF RSERC AND MRLOG FILES STARTED AT $(date '+%d-%b-%Y %H:%M:%S')"
-
-    # Set in-progress flag (VMS: create TAP_DAT_DIR:SFTP_ABS_IN_PROGRESS.FLAG)
+ 
     touch "${FLAG_FILE}"
-
-    # Step 1: Upload files via SFTP
+ 
+    # Step 1: Upload files via SFTP (includes inline rename for RSERC)
     if ! sftp -b "${sftp_batch}" "${DEST_USERNAME}@${DEST_HOSTNAME}"; then
         error_exit "ERROR WHILE TRANSFERRING THE RSERCS AND MRLOG FILES FROM TAP TO ABS - SFTP PROCESS" "${phase}"
     fi
     rm -f "${sftp_batch}"
-
-    # Step 2: Rename files on remote server (.sftp_tmp_rs -> .DAT)
-    if ! sftp -b "${rename_batch}" "${DEST_USERNAME}@${DEST_HOSTNAME}"; then
-        error_exit "ERROR WHILE RENAMING THE RSERCS AND MRLOG FILES FROM .SFTP_TMP_RS TO .DAT IN ABS - SFTP PROCESS" "${phase}"
-    fi
-    rm -f "${rename_batch}"
-
-    # Clean staging directory (VMS: DELETE SFTP_TMP_DIR:*.*;*)
+ 
+    ## [NEW v2] Separate rename SFTP call REMOVED — rename is inline in upload batch
+ 
+    # Clean staging directory
     rm -f "${SFTP_TMP_DIR:?}"/* 2>/dev/null || true
-
-    # Step 3: Delete local source files
+ 
+    # Step 2: Run local cleanup script (rename RSERC to .BCKUP / delete MRLOG)
     if ! bash "${delete_script}"; then
         error_exit "ERROR WHILE DELETING SFTPD FILES FROM XI_DAT DIRECTORY" "${phase}"
     fi
     rm -f "${delete_script}"
-
-    # Remove in-progress flag
+ 
     rm -f "${FLAG_FILE}"
-
+ 
     log_msg "SFTP PROCESS FOR TRANSFER OF RSERC AND MRLOG FILES COMPLETED AT $(date '+%d-%b-%Y %H:%M:%S')"
 }
-
+ 
 # ---- Check if shutdown is requested ----
-# VMS: FINAL_CHECK — checks TAP_CLOSEDOWN_ALL time and RSERC_TRANS_SHUTDOWN flag
 should_shutdown() {
-    # Check shutdown flag (VMS: F$TRNLNM("RSERC_TRANS_SHUTDOWN") .EQS. "Y")
     if [ "${RSERC_TRANS_SHUTDOWN}" = "Y" ]; then
         log_msg "Shutdown requested via RSERC_TRANS_SHUTDOWN flag"
         return 0
     fi
-
-    # Re-read flag in case it was changed externally
+ 
     if [ -f "${TAP_DAT_DIR}/RSERC_TRANS_SHUTDOWN.FLAG" ]; then
         log_msg "Shutdown requested via flag file"
         return 0
     fi
-
-    # Check time-based closedown (VMS: F$CVTIME() .GTS. F$TRNLNM("TAP_CLOSEDOWN_ALL"))
-    # When TAP_CLOSEDOWN_ALL is "N", time-based shutdown is disabled.
+ 
     if [ "${TAP_CLOSEDOWN_ALL}" != "N" ]; then
         local current_time
         current_time=$(date '+%H:%M')
@@ -385,105 +415,129 @@ should_shutdown() {
             return 0
         fi
     fi
-
+ 
+    ## [NEW v2] Auto-shutdown at hour 23 (11 PM)
+    local current_hour
+    current_hour=$(date '+%H')
+    if [ "${current_hour}" = "23" ]; then
+        log_msg "Hour is 23 — auto-shutting down"
+        return 0
+    fi
+ 
     return 1
 }
-
+ 
+# ---- [NEW v2] Pre-rename RSERC files to .OLD_SER ----
+pre_rename_rserc() {
+    local phase="PRE_RENAME_RSERC"
+    log_msg "Pre-renaming existing RSERC .DAT files to .OLD_SER before main loop"
+ 
+    for dat_file in "${FCS_RSERC_DIR}"/RSERC*.DAT; do
+        if [ -f "${dat_file}" ]; then
+            local base
+            base=$(basename "${dat_file}" .DAT)
+            mv -v "${dat_file}" "${FCS_RSERC_DIR}/${base}.OLD_SER" 2>&1 | tee -a "${LOG_FILE}"
+        fi
+    done
+}
+ 
+# ---- [NEW v2] Archive backup files ----
+archive_backups() {
+    local phase="ARCHIVE_BACKUPS"
+ 
+    local bckup_count
+    bckup_count=$(find "${FCS_RSERC_DIR}" -maxdepth 1 -name '*.BCKUP' 2>/dev/null | wc -l)
+ 
+    if [ "${bckup_count}" -gt 0 ]; then
+        log_msg "Archiving ${bckup_count} .BCKUP file(s) to ${TAP_FCS_ARCHIVE}"
+ 
+        for bckup_file in "${FCS_RSERC_DIR}"/*.BCKUP; do
+            if [ -f "${bckup_file}" ]; then
+                local base
+                base=$(basename "${bckup_file}" .BCKUP)
+                if cp "${bckup_file}" "${TAP_FCS_ARCHIVE}/${base}.DAT"; then
+                    rm -f "${bckup_file}"
+                    log_msg "Archived and removed: ${bckup_file}"
+                else
+                    log_msg "WARNING: Failed to archive ${bckup_file}"
+                fi
+            fi
+        done
+    fi
+}
+ 
 # ---- Main transfer loop ----
-# VMS: MAIN_PARA -> MAIN_LOOP
 main_loop() {
     local phase="MAIN_LOOP"
-
+ 
+    ## [NEW v2] Pre-rename RSERC files to .OLD_SER before entering loop
+    pre_rename_rserc
+ 
     while true; do
-        # Prepare batch files
+ 
+        ## [NEW v2] Archive previous cycle's .BCKUP files
+        archive_backups
+ 
         local sftp_batch="${TAP_DAT_DIR}/sftp_ctrl_file.dat"
-        local rename_batch="${TAP_DAT_DIR}/rename_sftpd_files_tmp.sh"
         local delete_script="${TAP_DAT_DIR}/delete_sftpd_files_tmp.sh"
-
-        # Create SFTP upload batch header
-        # VMS: WRITE SFTP_CTRL_FILE "binary" / "lcd SFTP_TMP_DIR" / "cd xi_dat"
-        # Note: "binary" is an FTP command, not valid in OpenSSH sftp.
-        # SFTP always transfers in binary mode — no mode switch needed.
+ 
+        ## [NEW v2] Remote directory changed to absolute path
         cat > "${sftp_batch}" <<EOF
 lcd ${SFTP_TMP_DIR}
 cd ${REMOTE_DIR}
 EOF
-
-        # Create remote rename batch header
-        # VMS: WRITE RENAME_TMP_FILE "cd xi_dat"
-        cat > "${rename_batch}" <<EOF
-cd ${REMOTE_DIR}
-EOF
-
-        # Create local delete script header
+ 
         cat > "${delete_script}" <<'EOF'
 #!/bin/bash
-# Auto-generated: delete source files after successful SFTP transfer
+# Auto-generated: rename/delete source files after successful SFTP transfer
 EOF
-
-        # Collect RSERC files (VMS: RSERC_FILE_COUNT loop)
-        collect_rserc_files "${sftp_batch}" "${rename_batch}" "${delete_script}"
-
-        # Collect MRLOG files (VMS: MRLOG_FILE_COUNT loop)
-        collect_mrlog_files "${sftp_batch}" "${rename_batch}" "${delete_script}"
-
+ 
+        ## [NEW v2] No separate rename batch — rename is inline in sftp_batch
+        collect_rserc_files "${sftp_batch}" "${delete_script}"
+        collect_mrlog_files "${sftp_batch}" "${delete_script}"
+ 
         if [ "${RSERC_COUNT}" -gt 0 ] || [ "${MRLOG_COUNT}" -gt 0 ]; then
             log_msg "Batch: ${RSERC_COUNT} RSERC files, ${MRLOG_COUNT} MRLOG files"
-
-            # Finalize batch files
+ 
             echo "exit" >> "${sftp_batch}"
-            echo "exit" >> "${rename_batch}"
-
-            # Execute the transfer
-            sftp_transfer "${sftp_batch}" "${rename_batch}" "${delete_script}"
+ 
+            sftp_transfer "${sftp_batch}" "${delete_script}"
         else
-            # No files to transfer — clean up empty batch files
-            rm -f "${sftp_batch}" "${rename_batch}" "${delete_script}"
-
+            rm -f "${sftp_batch}" "${delete_script}"
+ 
             log_msg "No files to transfer, waiting 10 minutes"
             sleep 600
         fi
-
-        # Check if we should shut down (VMS: FINAL_CHECK)
+ 
         if should_shutdown; then
             break
         fi
     done
 }
-
+ 
 ###############################################################################
 #                       MAIN
 ###############################################################################
-
+ 
 main() {
-    # Set up signal handling (VMS: ON ERROR THEN GOTO ERROR)
     trap 'error_exit "Caught signal, aborting" "SIGNAL"' SIGTERM SIGINT
     trap cleanup_and_exit EXIT
-
+ 
     log_msg "${SCRIPT_NAME} has started at $(date '+%d-%b-%Y %H:%M:%S')"
-
-    # Single instance check (VMS: CHECK_INSTANCES / SET PROCESS /NAME=)
+ 
     acquire_lock
-
-    # Validate environment (VMS: logical name checks)
     validate_environment
-
-    # Housekeeping (VMS: HOUSE_KEEP)
     housekeeping
-
-    # Read SFTP connection details (VMS: EXTRACT_SFTP)
+ 
+    # Read SFTP credentials from config file (never hardcoded)
     read_sftp_config
-
-    # Self-recovery from previous failure (VMS: SELF_RECOVERY)
+ 
     self_recovery
-
-    # Enter main transfer loop (VMS: MAIN_PARA)
     main_loop
-
-    # Clean exit
+ 
     log_msg "${SCRIPT_NAME} has completed successfully at $(date '+%d-%b-%Y %H:%M:%S')"
 }
-
+ 
 # ---- Script guard: allow sourcing for testing without executing main ----
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     main "$@"

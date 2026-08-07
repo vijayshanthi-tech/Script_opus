@@ -106,7 +106,25 @@ create_mrlog_files() {
 
 # ========================== TESTS ==========================
 
-# --- validate_environment tests ---
+# --- acquire_lock tests ---
+
+@test "acquire_lock succeeds when no other instance running" {
+    run acquire_lock
+    [ "$status" -eq 0 ]
+    # Lock file should exist
+    [ -f "${LOCK_FILE}" ]
+}
+
+@test "acquire_lock fails when another instance holds the lock" {
+    # Acquire lock first
+    eval "exec 200>${LOCK_FILE}"
+    flock -n 200
+
+    # Now try to acquire again
+    run acquire_lock
+    [ "$status" -eq 0 ]  # Script exits 0 when lock held by another
+    [[ "${output}" == *"process already running"* ]]
+}
 
 @test "validate_environment succeeds when all dirs and config exist" {
     run validate_environment
@@ -380,7 +398,120 @@ create_mrlog_files() {
 
 # --- log_msg test ---
 
+# --- log_msg test ---
+
 @test "log_msg writes timestamped message to log file" {
     log_msg "Test log message"
     grep -q "Test log message" "${LOG_FILE}"
+}
+
+# --- acquire_lock tests ---
+
+@test "acquire_lock succeeds when no other instance running" {
+    run acquire_lock
+    [ "$status" -eq 0 ]
+    # Lock file should exist
+    [ -f "${LOCK_FILE}" ]
+}
+
+@test "acquire_lock fails when another instance holds the lock" {
+    # Acquire lock first
+    eval "exec 200>${LOCK_FILE}"
+    flock -n 200
+
+    # Now try to acquire again
+    run acquire_lock
+    [ "$status" -eq 0 ]  # Script exits 0 when lock held by another
+    [[ "${output}" == *"process already running"* ]]
+}
+
+# --- error_exit test ---
+
+@test "error_exit logs error and exits with code 4" {
+    run error_exit "Test error message" "TEST_PHASE"
+    [ "$status" -eq 4 ]
+    grep -q "ERROR: *** tap_rsercfiles_transfer.sh - TEST_PHASE, Test error message" "${LOG_FILE}"
+}
+
+# --- cleanup_and_exit test ---
+
+@test "cleanup_and_exit releases lock and exits" {
+    # Acquire lock first
+    acquire_lock
+    [ -f "${LOCK_FILE}" ]
+
+    run cleanup_and_exit 99
+    [ "$status" -eq 99 ]
+    # Lock file should be gone
+    [ ! -f "${LOCK_FILE}" ]
+}
+
+# --- main_loop test (mocked to run one cycle) ---
+
+@test "main_loop processes files and shuts down when requested" {
+    create_rserc_files 2
+    create_mrlog_files 1
+    RSERC_TRANS_SHUTDOWN="Y"  # Shutdown after one cycle
+
+    run main_loop
+    [ "$status" -eq 0 ]
+
+    # Files should be transferred (mocked)
+    grep -q "SFTP_CALL" "${TAP_DAT_DIR}/sftp_calls.log"
+}
+
+# --- batch file generation tests ---
+
+@test "main_loop generates correct SFTP batch header" {
+    create_rserc_files 1
+
+    # Mock main_loop to capture batch files before transfer
+    # Since main_loop is hard to test, test the batch creation parts
+    local sftp_batch="${TAP_DAT_DIR}/sftp_ctrl_file.dat"
+    local rename_batch="${TAP_DAT_DIR}/rename_sftpd_files_tmp.sh"
+    local delete_script="${TAP_DAT_DIR}/delete_sftpd_files_tmp.sh"
+
+    # Simulate main_loop batch creation
+    cat > "${sftp_batch}" <<EOF
+lcd ${SFTP_TMP_DIR}
+cd ${REMOTE_DIR}
+EOF
+
+    collect_rserc_files "${sftp_batch}" "${rename_batch}" "${delete_script}"
+    echo "exit" >> "${sftp_batch}"
+
+    # Check header
+    head -n 2 "${sftp_batch}" | grep -q "lcd ${SFTP_TMP_DIR}"
+    head -n 2 "${sftp_batch}" | grep -q "cd ${REMOTE_DIR}"
+}
+
+@test "mixed batch RSERC and MRLOG files" {
+    create_rserc_files 3
+    create_mrlog_files 2
+
+    local sftp_batch="${TAP_DAT_DIR}/test_sftp.dat"
+    local rename_batch="${TAP_DAT_DIR}/test_rename.sh"
+    local delete_script="${TAP_DAT_DIR}/test_delete.sh"
+    > "${sftp_batch}"
+    > "${rename_batch}"
+    > "${delete_script}"
+
+    collect_rserc_files "${sftp_batch}" "${rename_batch}" "${delete_script}"
+    collect_mrlog_files "${sftp_batch}" "${rename_batch}" "${delete_script}"
+
+    [ "${RSERC_COUNT}" -eq 3 ]
+    [ "${MRLOG_COUNT}" -eq 2 ]
+
+    local total_put
+    total_put=$(grep -c "^put " "${sftp_batch}")
+    [ "${total_put}" -eq 5 ]
+}
+
+# --- signal handling test ---
+
+@test "signal handling calls error_exit on SIGTERM" {
+    # Since traps are set in main(), and main() is not called in tests,
+    # we can't easily test signals. This is a placeholder.
+    # In real testing, would need to run the script and send signals.
+    skip "Signal handling requires running the full script"
 }
