@@ -200,7 +200,7 @@ $ no_more_spids:
 $               close infile
 $               del mrlog.lis;*
 $!chk_ass_que:
-$!              wait 00:03:00
+$!              wait 00:02:00
 $!              sh que *ass*/out=rserc_chk.lis
 $!              sea rserc_chk.lis dist
 $!              if $status .eqs. "%X00000001"
